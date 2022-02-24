@@ -37,17 +37,17 @@ for gpu in gpus:
 class TestLayerNorm(flow.unittest.TestCase):
     def test_layer_norm(_):
         confs = [
-            {"x_shape": (40, 1024)},
+            {"x_shape": (40, 1025)},
         ]
         arg_dict = OrderedDict()
-        arg_dict["device_type"] = ["cpu", "gpu"]
+        arg_dict["device_type"] = ["gpu"]
         arg_dict["confs"] = confs
         arg_dict["data_type"] = ["float32", "float16"]
-        arg_dict["trainable"] = [True, False]
-        arg_dict["center"] = [True, False]
-        arg_dict["scale"] = [True, False]
+        arg_dict["trainable"] = [True]
+        arg_dict["center"] = [True]
+        arg_dict["scale"] = [True]
         arg_dict["epsilon"] = [1e-05]
-        arg_dict["fuse_add_to_output"] = [True, False]
+        arg_dict["fuse_add_to_output"] = [True]
         for case in GenArgList(arg_dict):
             (
                 device_type,

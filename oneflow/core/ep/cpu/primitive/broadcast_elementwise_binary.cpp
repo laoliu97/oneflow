@@ -110,7 +110,8 @@ std::unique_ptr<BroadcastElementwiseBinary> NewBroadcastElementwiseBinary() {
   OF_PP_MAKE_TUPLE_SEQ(BinaryOp::kDiv, Div) \
   OF_PP_MAKE_TUPLE_SEQ(BinaryOp::kMax, Max) \
   OF_PP_MAKE_TUPLE_SEQ(BinaryOp::kMin, Min) \
-  OF_PP_MAKE_TUPLE_SEQ(BinaryOp::kPow, Pow)
+  OF_PP_MAKE_TUPLE_SEQ(BinaryOp::kPow, Pow) \
+  OF_PP_MAKE_TUPLE_SEQ(BinaryOp::kFmod, FMod)
 
 #define NDARRAY_BINARY_TYPE_SEQ \
   CPU_PRIMITIVE_INT8_TYPE_SEQ   \

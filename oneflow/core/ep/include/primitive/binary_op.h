@@ -32,6 +32,7 @@ enum class BinaryOp {
   kMax,
   kMin,
   kPow,
+  kFmod,
   // Comparision
   kEqual,
   kNotEqual,

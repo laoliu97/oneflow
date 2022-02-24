@@ -32,12 +32,31 @@ struct BinaryFunctor<DeviceType::kCUDA, BinaryOp::kPow, half, half> {
   }
 };
 
+template<typename Src, typename Dst>
+struct BinaryFunctor<DeviceType::kCUDA, BinaryOp::kFmod, Src, Dst> {
+  OF_DEVICE_FUNC Dst operator()(Src src0, Src src1) const { return fmod(src0, src1); }
+};
+
+template<>
+struct BinaryFunctor<DeviceType::kCUDA, BinaryOp::kFmod, half, half> {
+  OF_DEVICE_FUNC half operator()(half src0, half src1) const {
+    return static_cast<half>(fmod(static_cast<float>(src0), static_cast<float>(src1)));
+  }
+};
+
 #if CUDA_VERSION >= 11000
 
 template<>
 struct BinaryFunctor<DeviceType::kCUDA, BinaryOp::kPow, nv_bfloat16, nv_bfloat16> {
   OF_DEVICE_FUNC nv_bfloat16 operator()(nv_bfloat16 src0, nv_bfloat16 src1) const {
     return static_cast<nv_bfloat16>(pow(static_cast<float>(src0), static_cast<float>(src1)));
+  }
+};
+
+template<>
+struct BinaryFunctor<DeviceType::kCUDA, BinaryOp::kFmod, nv_bfloat16, nv_bfloat16> {
+  OF_DEVICE_FUNC nv_bfloat16 operator()(nv_bfloat16 src0, nv_bfloat16 src1) const {
+    return static_cast<half>(fmod(static_cast<float>(src0), static_cast<float>(src1)));
   }
 };
 
