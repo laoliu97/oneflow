@@ -83,7 +83,7 @@ class ScalarMathBaseFunctor {
   Maybe<Tensor> operator()(const std::shared_ptr<one::Tensor>& x, const Scalar& scalar,
                            bool inplace) const {
     if (std::dynamic_pointer_cast<StaticZerosTensor>(x) && op_->op_type_name() == "scalar_mul") {
-      return x;
+      return x->contiguous();
     }
     MutableAttrMap attrs;
     TensorProcessor tensor_processor;
@@ -114,14 +114,15 @@ class ScalarMathBaseFunctor {
       UNIMPLEMENTED_THEN_RETURN() << "The scalar in " << op_->op_type_name()
                                   << " should be float or int.";
     }
-    JUST(tensor_processor.AddInputs({x}, lowest_dtype).Apply());
+    JUST(tensor_processor.AddInputs({x->contiguous()}, lowest_dtype).Apply());
     TensorTuple casted_vec = JUST(tensor_processor.GetInputs());
     if (inplace) {
-      JUST(CheckInplaceCastValid(x, casted_vec[0]));
-      JUST(CheckInplaceValid(x));
+      auto xx = JUST(functional::InplaceToContiguous(x));
+      JUST(CheckInplaceCastValid(xx, casted_vec[0]));
+      JUST(CheckInplaceValid(xx));
       std::shared_ptr<TensorTuple> outputs = std::make_shared<TensorTuple>(1);
-      outputs->at(0) = x;
-      JUST(OpInterpUtil::Dispatch(*op_, {x}, outputs.get(), attrs));
+      outputs->at(0) = xx;
+      JUST(OpInterpUtil::Dispatch(*op_, {xx}, outputs.get(), attrs));
       return outputs->at(0);
     } else {
       return OpInterpUtil::Dispatch<Tensor>(*op_, casted_vec, attrs);
