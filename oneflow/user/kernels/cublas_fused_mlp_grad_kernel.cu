@@ -240,9 +240,9 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
             matmul_grad_cache->cublas_c_desc, nullptr, kernel_state->cublas_workspace(),
             kernel_state->cublas_workspace_size(), kernel_state->cuda_stream()));
         OF_CUDA_CHECK(cudaEventRecord(async_weight_grad_event, kernel_state->cuda_stream()));
-        OF_CUDA_CHECK(cudaStreamWaitEvent(cuda_stream->cuda_stream(), async_weight_grad_event));
       }
     }
+    OF_CUDA_CHECK(cudaStreamWaitEvent(cuda_stream->cuda_stream(), async_weight_grad_event));
     printf("end kernel \n");
   };
 
