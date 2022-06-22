@@ -93,6 +93,8 @@ class CacheKeyValueStoreImpl : public KeyValueStore {
   void Get(ep::Stream* stream, uint32_t num_keys, const void* keys, void* values,
            uint8_t* mask) override;
   void Put(ep::Stream* stream, uint32_t num_keys, const void* keys, const void* values) override;
+  void FusedHalfUpdatePut(ep::Stream* stream, uint32_t n_keys, const void* keys, const void* values,
+                          const void* update, const float* lr, float scale) override;
   bool SnapshotExists(const std::string& name) override;
   void LoadSnapshot(const std::string& name) override;
   void SaveSnapshot(const std::string& name) override;
@@ -176,6 +178,20 @@ void CacheKeyValueStoreImpl<Key, Elem>::Put(ep::Stream* stream, uint32_t num_key
                                 cuda_stream->cuda_stream()));
   CHECK_JUST(cuda_stream->Sync());
   store_->Put(stream, *host_num_buffer_, keys_buffer_, values_buffer_);
+}
+
+template<typename Key, typename Elem>
+void CacheKeyValueStoreImpl<Key, Elem>::FusedHalfUpdatePut(ep::Stream* stream, uint32_t num_keys,
+                                                           const void* keys, const void* values,
+                                                           const void* update, const float* lr,
+                                                           float scale) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (cache_->Policy() != CacheOptions::Policy::kFull || cache_->ValueType() != DataType::kFloat) {
+    UNIMPLEMENTED();
+  }
+  synced_ = false;
+  cache_->FusedHalfUpdatePut(stream, num_keys, keys, values, update, lr, scale, num_buffer_,
+                             keys_buffer_, values_buffer_);
 }
 
 template<typename Key, typename Elem>
