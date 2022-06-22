@@ -368,6 +368,7 @@ __global__ void InitValueKernel(uint64_t seed, one::CUDAGeneratorState* cuda_gen
 
 template<typename T, typename U, typename IDX>
 void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embedding_state,
+                          const std::string& embedding_name, const int64_t parallel_id,
                           const int64_t num_ids, const int64_t embedding_size,
                           const int64_t line_size, const bool is_prefetch, int64_t current_iter,
                           const void* num_unique_ptr, const void* unique_ids, const void* table_ids,
@@ -387,11 +388,18 @@ void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embeddi
   EmbeddingTmpBufferManager buffer_manager(tmp_buffer_ptr, num_ids, line_size * sizeof(T),
                                            need_value_buffer);
   cudaStream_t cuda_stream = stream->As<ep::CudaStream>()->cuda_stream();
-  void* host_num_keys = embedding_state->HostNumKeys();
-  OF_CUDA_CHECK(
-      cudaMemcpyAsync(host_num_keys, num_unique_ptr, sizeof(IDX), cudaMemcpyDefault, cuda_stream));
-  CHECK_JUST(stream->Sync());
-  uint32_t num_unique = *reinterpret_cast<IDX*>(host_num_keys);
+  uint32_t num_unique;
+  if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_SAVE_NUM_UNIQUE_MATRIX", true)) {
+    embedding::NumUniques* num_uniques =
+        Global<embedding::EmbeddingManager>::Get()->GetNumUniques(embedding_name, parallel_id);
+    num_unique = num_uniques->GetNumUnique(current_iter);
+  } else {
+    void* host_num_keys = embedding_state->HostNumKeys();
+    OF_CUDA_CHECK(cudaMemcpyAsync(host_num_keys, num_unique_ptr, sizeof(IDX), cudaMemcpyDefault,
+                                  cuda_stream));
+    CHECK_JUST(stream->Sync());
+    num_unique = *reinterpret_cast<IDX*>(host_num_keys);
+  }
   uint32_t* num_missing_ptr =
       buffer_manager.template Ptr<uint32_t>(EmbeddingBufferType::kNumMissing);
   uint32_t* missing_indices =
@@ -417,7 +425,7 @@ void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embeddi
     store_values = need_value_buffer ? buffer_manager.template Ptr<T>(EmbeddingBufferType::kValues)
                                      : values_ptr;
   }
-
+  void* host_num_keys = embedding_state->HostNumKeys();
   store->Get(stream, num_unique, unique_ids, store_values, num_missing_ptr, missing_indices);
   CHECK_GE(sizeof(IDX), sizeof(uint32_t));  // host_num_keys's buffer size is sizeof(IDX)
   OF_CUDA_CHECK(cudaMemcpyAsync(host_num_keys, num_missing_ptr, sizeof(uint32_t), cudaMemcpyDefault,
@@ -523,10 +531,11 @@ class EmbeddingPrefetchKernel final : public user_op::OpKernel {
     const int64_t line_size = ctx->Attr<int64_t>("line_size");
     uint32_t num_unique;
     T* values_ptr = nullptr;
-    LookupAndInitMissing<T, U, IDX>(ctx->stream(), embedding_state, unique_ids->shape().elem_cnt(),
-                                    embedding_size, line_size, true, current_iter_,
-                                    num_unique_ids->dptr(), unique_ids->dptr(), table_ids->dptr(),
-                                    values_ptr, tmp_buffer->mut_dptr(), &num_unique, nullptr);
+    LookupAndInitMissing<T, U, IDX>(
+        ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
+        ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
+        line_size, true, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
+        table_ids->dptr(), values_ptr, tmp_buffer->mut_dptr(), &num_unique, nullptr);
     current_iter_++;
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
@@ -598,9 +607,10 @@ class EmbeddingLookupKernel final : public user_op::OpKernel {
       embedding::ValuesPtr* ptrs = Global<embedding::EmbeddingManager>::Get()->GetValuesPtr(
           ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
       LookupAndInitMissing<T, U, IDX>(
-          ctx->stream(), embedding_state, unique_ids->shape().elem_cnt(), embedding_size, line_size,
-          false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(), table_ids->dptr(),
-          nullptr, tmp_buffer->mut_dptr(), &num_unique, ptrs);
+          ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
+          ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
+          line_size, false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
+          table_ids->dptr(), nullptr, tmp_buffer->mut_dptr(), &num_unique, ptrs);
       if (ctx->has_output("embeddings", 0)) {
         user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
         const size_t lookup_embeddings_size = GetCudaAlignedSize(
@@ -615,9 +625,11 @@ class EmbeddingLookupKernel final : public user_op::OpKernel {
       }
     } else {
       LookupAndInitMissing<T, U, IDX>(
-          ctx->stream(), embedding_state, unique_ids->shape().elem_cnt(), embedding_size, line_size,
-          false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(), table_ids->dptr(),
-          unique_values->mut_dptr<T>(), tmp_buffer->mut_dptr(), &num_unique, nullptr);
+          ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
+          ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
+          line_size, false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
+          table_ids->dptr(), unique_values->mut_dptr<T>(), tmp_buffer->mut_dptr(), &num_unique,
+          nullptr);
       if (ctx->has_output("embeddings", 0)) {
         user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
         CopyValuesToEmbeddings<T>(ctx->stream(), num_unique, embedding_size, line_size,
@@ -625,12 +637,12 @@ class EmbeddingLookupKernel final : public user_op::OpKernel {
                                   unique_values->dptr<T>(), embeddings->mut_dptr());
       }
     }
-    if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_SAVE_NUM_UNIQUE_MATRIX", true)) {
-      embedding::NumUniques* num_uniques =
-          Global<embedding::EmbeddingManager>::Get()->GetNumUniques(
-              ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
-      num_uniques->SetNumUnique(num_unique, current_iter_);
-    }
+    // if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_SAVE_NUM_UNIQUE_MATRIX", true)) {
+    //  embedding::NumUniques* num_uniques =
+    //      Global<embedding::EmbeddingManager>::Get()->GetNumUniques(
+    //          ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
+    //  num_uniques->SetNumUnique(num_unique, current_iter_);
+    //}
     current_iter_++;
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }

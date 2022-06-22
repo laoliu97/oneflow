@@ -90,6 +90,8 @@ class CacheKeyValueStoreImpl : public KeyValueStore {
 
   void Get(ep::Stream* stream, uint32_t num_keys, const void* keys, void* values,
            uint32_t* n_missing, uint32_t* missing_indices) override;
+  void Get(ep::Stream* stream, uint32_t num_keys, const void* keys, void* values,
+           uint8_t* mask) override;
   void Put(ep::Stream* stream, uint32_t num_keys, const void* keys, const void* values) override;
   bool SnapshotExists(const std::string& name) override;
   void LoadSnapshot(const std::string& name) override;
@@ -148,11 +150,26 @@ void CacheKeyValueStoreImpl<Key, Elem>::Get(ep::Stream* stream, uint32_t num_key
 }
 
 template<typename Key, typename Elem>
+void CacheKeyValueStoreImpl<Key, Elem>::Get(ep::Stream* stream, uint32_t num_keys, const void* keys,
+                                            void* values, uint8_t* mask) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (cache_->Policy() == CacheOptions::Policy::kFull) {
+    cache_->Get(stream, num_keys, keys, values, mask);
+    return;
+  } else {
+    UNIMPLEMENTED();
+  }
+}
+
+template<typename Key, typename Elem>
 void CacheKeyValueStoreImpl<Key, Elem>::Put(ep::Stream* stream, uint32_t num_keys, const void* keys,
                                             const void* values) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   synced_ = false;
   auto cuda_stream = stream->As<ep::CudaStream>();
+  if (cache_->Policy() != CacheOptions::Policy::kFull) {
+    OF_CUDA_CHECK(cudaMemsetAsync(num_buffer_, 0, sizeof(uint32_t), cuda_stream->cuda_stream()));
+  }
   cache_->Put(stream, num_keys, keys, values, num_buffer_, keys_buffer_, values_buffer_);
   if (cache_->Policy() == CacheOptions::Policy::kFull) { return; }
   OF_CUDA_CHECK(cudaMemcpyAsync(host_num_buffer_, num_buffer_, sizeof(uint32_t), cudaMemcpyDefault,
