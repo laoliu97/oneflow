@@ -40,9 +40,11 @@ Maybe<void> InferTensorDesc4FusedMatmulBackward(user_op::InferContext* ctx) {
 Maybe<void> InferDataType4MatmulBackward(user_op::InferContext* ctx) {
   const int64_t weight_size = ctx->input_size("weights");
   const int64_t dweight_size = ctx->output_size("d_weights");
-  CHECK_EQ(weight_size, dweight_size) << "The number of weights and d_weights should be equal. "; 
+  CHECK_EQ(weight_size, dweight_size) << "The number of weights and d_weights should be equal. ";
   const int64_t dbias_size = ctx->output_size("d_biases");
-  CHECK_EQ(weight_size - 1, dbias_size) << "The number of d_biases should be equal to weight_size - 1. Because last layer's bias_grad is computed by ReduceSum. "; 
+  CHECK_EQ(weight_size - 1, dbias_size)
+      << "The number of d_biases should be equal to weight_size - 1. Because last layer's "
+         "bias_grad is computed by ReduceSum. ";
   const user_op::TensorDesc& dy_desc = ctx->InputTensorDesc("dy", 0);
   for (int idx = weight_size - 1; idx > -1; idx--) {
     const user_op::TensorDesc& weight_desc = ctx->InputTensorDesc("weights", idx);
@@ -77,12 +79,13 @@ Maybe<void> InferDataType4MatmulBackward(user_op::InferContext* ctx) {
   }
 
   builder.Split(user_op::OpArg("d_grad", 0), 0);
-  for (int i = 0; i < ctx->user_op_conf().input_size("d_biases"); ++i) {
+  for (int i = 0; i < ctx->user_op_conf().output_size("d_biases"); ++i) {
     builder.PartialSum(user_op::OpArg("d_biases", i));
   }
-  for (int i = 0; i < ctx->user_op_conf().input_size("d_weights"); ++i) {
+  for (int i = 0; i < ctx->user_op_conf().output_size("d_weights"); ++i) {
     builder.PartialSum(user_op::OpArg("d_weights", i));
   }
+  builder.Build();
   return Maybe<void>::Ok();
 }
 
