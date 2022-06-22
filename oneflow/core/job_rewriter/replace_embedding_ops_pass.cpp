@@ -191,8 +191,8 @@ void BuildEmbeddingShuffle(JobBuilder* job_builder, const std::string& embedding
           .ScopeSymbolId(embedding_op.op_conf().scope_symbol_id())
           .Build();
   OperatorConf embedding_shuffle_new_op_conf = embedding_shuffle_op.op_conf();
-  if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_EMBEDDING_SHUFFLE_INDEPENTENT_STREAM", false)) {
-    embedding_shuffle_new_op_conf.set_stream_name_hint(embedding_name + "_EMBEDDING_SHUFFLE");
+  if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_EMBEDDING_SHUFFLE_INDEPENTENT_STREAM", true)) {
+    embedding_shuffle_new_op_conf.set_stream_name_hint(embedding_name + "_EMBEDDING");
   }
   add_ops->push_back(embedding_shuffle_new_op_conf);
   *new_embeddings_lbn = embedding_shuffle_op.output("embeddings", 0);
@@ -257,9 +257,9 @@ void BuildEmbeddingGradientShuffle(
             .ScopeSymbolId(embedding_scope_symbol_id)
             .Build();
     OperatorConf embedding_gradient_shuffle_new_op_conf = embedding_gradient_shuffle_op.op_conf();
-    if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_EMBEDDING_SHUFFLE_INDEPENTENT_STREAM", false)) {
-      embedding_gradient_shuffle_new_op_conf.set_stream_name_hint(embedding_name
-                                                                  + "_EMBEDDING_SHUFFLE");
+    if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_EMBEDDING_GRADIENT_SHUFFLE_INDEPENTENT_STREAM",
+                            false)) {
+      embedding_gradient_shuffle_new_op_conf.set_stream_name_hint(embedding_name + "_EMBEDDING");
     }
     job_builder->AddOps(embedding_parallel_conf, {embedding_gradient_shuffle_new_op_conf});
     *cur_rank_unique_embedding_grad_lbn =
