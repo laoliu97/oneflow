@@ -268,11 +268,12 @@ class OrdinalEncoder {
     if (insert) {
       RUN_CUDA_KERNEL((OrdinalEncodeKernel<Key, Index>), stream, num_keys, table_capacity_,
                       table_keys_, table_indices_, table_size_, num_keys, keys, context);
-      OF_CUDA_CHECK(cudaMemcpyAsync(table_size_host_, table_size_, sizeof(Index), cudaMemcpyDefault,
-                                    stream->As<ep::CudaStream>()->cuda_stream()));
-      CHECK_JUST(stream->Sync());
-      CHECK_LT(*table_size_host_, capacity_)
-          << "The number of key is larger than cache size, please enlarge cache_memory_budget. ";
+      // OF_CUDA_CHECK(cudaMemcpyAsync(table_size_host_, table_size_, sizeof(Index),
+      // cudaMemcpyDefault,
+      //                              stream->As<ep::CudaStream>()->cuda_stream()));
+      // CHECK_JUST(stream->Sync());
+      // CHECK_LT(*table_size_host_, capacity_)
+      //    << "The number of key is larger than cache size, please enlarge cache_memory_budget. ";
     } else {
       RUN_CUDA_KERNEL((OrdinalEncodeLookupKernel<Key, Index>), stream, num_keys, table_capacity_,
                       table_keys_, table_indices_, num_keys, keys, context);
@@ -428,8 +429,6 @@ template<typename Key, typename Elem, typename Index>
 void CacheImpl<Key, Elem, Index>::Put(ep::Stream* stream, uint32_t n_keys, const void* keys,
                                       const void* values, uint32_t* n_evicted, void* evicted_keys,
                                       void* evicted_values) {
-  OF_CUDA_CHECK(
-      cudaMemsetAsync(n_evicted, 0, sizeof(uint32_t), stream->As<ep::CudaStream>()->cuda_stream()));
   if (n_keys == 0) { return; }
   CHECK_LE(n_keys, max_query_length_);
   encoder_.template Encode<true>(stream, n_keys, static_cast<const Key*>(keys), encoding_buffer_);
