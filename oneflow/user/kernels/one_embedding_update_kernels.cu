@@ -308,11 +308,9 @@ class SgdEmbeddingUpdateKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
   mutable int64_t current_iter_;
 };
-
 #define IDX_DATA_TYPE_SEQ                           \
   OF_PP_MAKE_TUPLE_SEQ(uint32_t, DataType::kUInt32) \
   OF_PP_MAKE_TUPLE_SEQ(int32_t, DataType::kInt32)
-
 #define REGISTER_CUDA_SGD_EMBEDDING_UPDATE_KERNEL(t_dtype_pair, g_type_pair, idx_dtype_pair)      \
   REGISTER_USER_KERNEL("sgd_embedding_update")                                                    \
       .SetCreateFn<                                                                               \
@@ -323,10 +321,8 @@ class SgdEmbeddingUpdateKernel final : public user_op::OpKernel {
           && (user_op::HobDataType("num_unique_ids", 0) == OF_PP_PAIR_SECOND(idx_dtype_pair))     \
           && (user_op::HobDataType("embedding_grad", 0) == OF_PP_PAIR_SECOND(g_type_pair))        \
           && (user_op::HobDataType("unique_embeddings", 0) == OF_PP_PAIR_SECOND(t_dtype_pair)));
-
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_SGD_EMBEDDING_UPDATE_KERNEL, FLOATING_DATA_TYPE_SEQ,
                                  FLOATING_DATA_TYPE_SEQ HALF_DATA_TYPE_SEQ, IDX_DATA_TYPE_SEQ)
-
 template<typename T, typename G, typename IDX>
 class MomentumEmbeddingUpdateKernel final : public user_op::OpKernel {
  public:
@@ -392,7 +388,6 @@ class MomentumEmbeddingUpdateKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
   mutable int64_t current_iter_;
 };
-
 #define REGISTER_CUDA_MOMENTUM_EMBEDDING_UPDATE_KERNEL(t_dtype_pair, g_type_pair, idx_dtype_pair) \
   REGISTER_USER_KERNEL("momentum_embedding_update")                                               \
       .SetCreateFn<MomentumEmbeddingUpdateKernel<OF_PP_PAIR_FIRST(t_dtype_pair),                  \
@@ -403,11 +398,9 @@ class MomentumEmbeddingUpdateKernel final : public user_op::OpKernel {
           && (user_op::HobDataType("num_unique_ids", 0) == OF_PP_PAIR_SECOND(idx_dtype_pair))     \
           && (user_op::HobDataType("embedding_grad", 0) == OF_PP_PAIR_SECOND(g_type_pair))        \
           && (user_op::HobDataType("unique_embeddings", 0) == OF_PP_PAIR_SECOND(t_dtype_pair)));
-
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_MOMENTUM_EMBEDDING_UPDATE_KERNEL,
                                  FLOATING_DATA_TYPE_SEQ, FLOATING_DATA_TYPE_SEQ HALF_DATA_TYPE_SEQ,
                                  IDX_DATA_TYPE_SEQ)
-
 template<typename T, typename G, typename IDX>
 class AdamEmbeddingUpdateKernel final : public user_op::OpKernel {
  public:
@@ -428,7 +421,6 @@ class AdamEmbeddingUpdateKernel final : public user_op::OpKernel {
     const int64_t line_size = ctx->Attr<int64_t>("line_size");
     const int64_t embedding_size = ctx->Attr<int64_t>("embedding_size");
     CHECK_EQ(line_size, embedding_size * 3);
-
     const float l1 = ctx->Attr<float>("l1");
     const float l2 = ctx->Attr<float>("l2");
     const auto weight_decay = ctx->Attr<float>("weight_decay");
@@ -486,7 +478,6 @@ class AdamEmbeddingUpdateKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
   mutable int64_t current_iter_;
 };
-
 #define REGISTER_CUDA_ADAM_EMBEDDING_UPDATE_KERNEL(t_dtype_pair, g_type_pair, idx_dtype_pair)      \
   REGISTER_USER_KERNEL("adam_embedding_update")                                                    \
       .SetCreateFn<                                                                                \
@@ -497,10 +488,8 @@ class AdamEmbeddingUpdateKernel final : public user_op::OpKernel {
           && (user_op::HobDataType("num_unique_ids", 0) == OF_PP_PAIR_SECOND(idx_dtype_pair))      \
           && (user_op::HobDataType("embedding_grad", 0) == OF_PP_PAIR_SECOND(g_type_pair))         \
           && (user_op::HobDataType("unique_embeddings", 0) == OF_PP_PAIR_SECOND(t_dtype_pair)));
-
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_ADAM_EMBEDDING_UPDATE_KERNEL, FLOATING_DATA_TYPE_SEQ,
                                  FLOATING_DATA_TYPE_SEQ HALF_DATA_TYPE_SEQ, IDX_DATA_TYPE_SEQ)
-
 template<typename T, typename G, typename IDX>
 class AdagradEmbeddingUpdateKernel final : public user_op::OpKernel {
  public:
@@ -521,7 +510,6 @@ class AdagradEmbeddingUpdateKernel final : public user_op::OpKernel {
     const int64_t line_size = ctx->Attr<int64_t>("line_size");
     const int64_t embedding_size = ctx->Attr<int64_t>("embedding_size");
     CHECK_EQ(line_size, embedding_size * 2);
-
     const float l1 = ctx->Attr<float>("l1");
     const float l2 = ctx->Attr<float>("l2");
     const auto weight_decay = ctx->Attr<float>("weight_decay");
@@ -569,7 +557,6 @@ class AdagradEmbeddingUpdateKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
   mutable int64_t current_iter_;
 };
-
 #define REGISTER_CUDA_ADAGRAD_EMBEDDING_UPDATE_KERNEL(t_dtype_pair, g_type_pair, idx_dtype_pair) \
   REGISTER_USER_KERNEL("adagrad_embedding_update")                                               \
       .SetCreateFn<AdagradEmbeddingUpdateKernel<OF_PP_PAIR_FIRST(t_dtype_pair),                  \
@@ -580,11 +567,9 @@ class AdagradEmbeddingUpdateKernel final : public user_op::OpKernel {
           && (user_op::HobDataType("num_unique_ids", 0) == OF_PP_PAIR_SECOND(idx_dtype_pair))    \
           && (user_op::HobDataType("embedding_grad", 0) == OF_PP_PAIR_SECOND(g_type_pair))       \
           && (user_op::HobDataType("unique_embeddings", 0) == OF_PP_PAIR_SECOND(t_dtype_pair)));
-
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_ADAGRAD_EMBEDDING_UPDATE_KERNEL,
                                  FLOATING_DATA_TYPE_SEQ, FLOATING_DATA_TYPE_SEQ HALF_DATA_TYPE_SEQ,
                                  IDX_DATA_TYPE_SEQ)
-
 template<typename T, typename G, typename IDX>
 class FtrlEmbeddingUpdateKernel final : public user_op::OpKernel {
  public:
@@ -665,5 +650,4 @@ class FtrlEmbeddingUpdateKernel final : public user_op::OpKernel {
           && (user_op::HobDataType("unique_embeddings", 0) == OF_PP_PAIR_SECOND(t_dtype_pair)));
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_FTRL_EMBEDDING_UPDATE_KERNEL, FLOATING_DATA_TYPE_SEQ,
                                  FLOATING_DATA_TYPE_SEQ HALF_DATA_TYPE_SEQ, IDX_DATA_TYPE_SEQ)
-
 }  // namespace oneflow
