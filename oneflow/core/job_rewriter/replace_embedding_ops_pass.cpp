@@ -20,6 +20,7 @@ limitations under the License.
 #include "oneflow/core/embedding/key_value_store_options.h"
 #include "oneflow/core/common/container_util.h"
 #include "oneflow/core/job_rewriter/clip_by_global_norm_job_pass_state.h"
+#include "oneflow/core/embedding/embedding_manager.h"
 
 namespace oneflow {
 
@@ -953,7 +954,8 @@ Maybe<void> ReplaceEmbeddingOps::Apply(const OpGraph& op_graph, JobBuilder* job_
     const int64_t embedding_size = embedding_op.attr<int64_t>("embedding_size");
     const int64_t parallel_num = op_node->parallel_desc().parallel_num();
     const bool use_system_gather =
-        (parallel_num == 1 && ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_USE_SYSTEM_GATHER", true));
+        (parallel_num == 1 && ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_USE_SYSTEM_GATHER", true)
+         && !embedding::UseDynamicMemoryAllocation());
     std::vector<OperatorConf> add_ops;
     std::vector<std::string> delete_op_names;
     std::string new_embeddings_lbn;
