@@ -459,6 +459,18 @@ class IdShuffleKernel final : public user_op::OpKernel {
       OF_CUDA_CHECK(cudaMemsetAsync(cur_rank_unique_table_ids->mut_dptr(), 0,
                                     received_elem_cnt * sizeof(U), cuda_stream));
     }
+    if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_SAVE_NUM_UNIQUE_MATRIX", true)) {
+      // reuse HostNumUniqueMatrix ptr
+      IDX* host_num_unique = kernel_state->HostNumUniqueMatrix();
+      OF_CUDA_CHECK(cudaMemcpyAsync(host_num_unique, cur_rank_num_unique->dptr(), sizeof(IDX),
+                                    cudaMemcpyDefault, cuda_stream));
+      CHECK_JUST(ctx->stream()->Sync());
+      uint32_t num_unique = *host_num_unique;
+      embedding::NumUniques* num_uniques =
+          Global<embedding::EmbeddingManager>::Get()->GetNumUniques(
+              ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
+      num_uniques->SetNumUnique(num_unique, current_iter_);
+    }
     current_iter_++;
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }

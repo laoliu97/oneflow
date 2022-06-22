@@ -154,19 +154,36 @@ class ValuesPtr {
 class NumUniques {
  public:
   NumUniques() {
+    num_unique_0_iter_ = -1;
+    num_unique_1_iter_ = -1;
     num_unique_matrix_0_iter_ = -1;
     num_unique_matrix_1_iter_ = -1;
   }
   ~NumUniques() = default;
   uint32_t GetNumUnique(int iter) {
     std::unique_lock<std::mutex> lock(mutex_);
-    CHECK_EQ(iter, num_unique_iter_);
-    return lookup_num_unique_;
+    if (num_unique_0_iter_ == iter) {
+      return lookup_num_unique_0_;
+    } else if (num_unique_1_iter_ == iter) {
+      return lookup_num_unique_1_;
+    } else {
+      LOG(ERROR) << "iter " << iter << " num_unique_0_iter_ " << num_unique_0_iter_
+                 << " num_unique_1_iter_ " << num_unique_1_iter_;
+      UNIMPLEMENTED();
+      return lookup_num_unique_0_;
+    }
   }
   void SetNumUnique(uint32_t num_unique, int iter) {
     std::unique_lock<std::mutex> lock(mutex_);
-    lookup_num_unique_ = num_unique;
-    num_unique_iter_ = iter;
+    if (last_use_num_unique != 0) {
+      lookup_num_unique_0_ = num_unique;
+      num_unique_0_iter_ = iter;
+      last_use_num_unique = 0;
+    } else {
+      lookup_num_unique_1_ = num_unique;
+      num_unique_1_iter_ = iter;
+      last_use_num_unique = 1;
+    }
   }
   void SetNumUniqueMatrix(const std::vector<uint32_t>& num_unique_matrix, int iter) {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -195,8 +212,11 @@ class NumUniques {
   }
 
  private:
-  uint32_t lookup_num_unique_;
-  int num_unique_iter_;
+  uint32_t lookup_num_unique_0_;
+  uint32_t lookup_num_unique_1_;
+  int num_unique_0_iter_;
+  int num_unique_1_iter_;
+  int last_use_num_unique;
   std::vector<uint32_t> num_unique_matrix_0_;
   int num_unique_matrix_0_iter_;
   std::vector<uint32_t> num_unique_matrix_1_;
