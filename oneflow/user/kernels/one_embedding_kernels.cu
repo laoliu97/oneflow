@@ -366,13 +366,105 @@ __global__ void InitValueKernel(uint64_t seed, one::CUDAGeneratorState* cuda_gen
   }
 }
 
-template<typename T, typename U, typename IDX>
+template<typename T, size_t pack_size>
+struct alignas(sizeof(T) * pack_size) Pack {
+  T elem[pack_size];
+};
+
+template<typename T, typename U, typename V, int pack_size>
+__global__ void FusedInitSliceCast(const int32_t elem_cnt, uint64_t seed,
+                                   one::CUDAGeneratorState* cuda_gen_state, uint64_t inc_offset,
+                                   const int32_t line_size, const int32_t embedding_size,
+                                   const int32_t line_num_pack, const int32_t embedding_num_pack,
+                                   const EmbeddingInitializer* initializer_param,
+                                   const int8_t* initializer_index, const U* table_ids,
+                                   const uint8_t* lookup_mask, Pack<T, pack_size>* values,
+                                   Pack<V, pack_size>* embeddings) {
+  int32_t global_thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+  curandStatePhilox4_32_10_t state;
+  curand_init(seed, global_thread_id, cuda_gen_state->dev_offset, &state);
+  CUDA_1D_KERNEL_LOOP(i, elem_cnt) {
+    int row = i / line_num_pack;
+    int col = i - row * line_num_pack;
+    Pack<T, pack_size> value_i;
+    if (!lookup_mask[row]) {
+      const int32_t table_idx = table_ids[row];
+#pragma unroll
+      for (int k = 0; k < pack_size; ++k) {
+        const int32_t initializer_idx =
+            initializer_index[table_idx * line_size + col * pack_size + k];
+        EmbeddingInitializer initializer = initializer_param[initializer_idx];
+        T value;
+        // TODO:use curand_uniform4
+        if (initializer.type == InitializerType::kUniform) {
+          const float low = initializer.uniform_param.low;
+          const float high = initializer.uniform_param.high;
+          value = curand_uniform(&state) * (high - low) + low;
+        } else if (initializer.type == InitializerType::kNormal) {
+          const float mean = initializer.normal_param.mean;
+          const float std = initializer.normal_param.std;
+          value = curand_normal(&state) * std + mean;
+        } else if (initializer.type == InitializerType::kConstant) {
+          value = initializer.constant_param.value;
+        } else {
+          __trap();
+        }
+        value_i.elem[k] = value;
+      }
+      values[i] = value_i;
+    } else {
+      value_i = values[i];
+    }
+    if (embeddings != nullptr && col < embedding_num_pack) {
+      int64_t embedding_offset = row * embedding_num_pack + col;
+      Pack<V, pack_size> embedding_i;
+#pragma unroll
+      for (int k = 0; k < pack_size; ++k) { embedding_i.elem[k] = static_cast<V>(value_i.elem[k]); }
+      embeddings[embedding_offset] = embedding_i;
+    }
+  }
+}
+
+template<typename T, typename U, typename V>
+void InitMissingAndSliceCast(cudaStream_t cuda_stream, uint32_t num_unique,
+                             const int64_t embedding_size, const int64_t line_size, uint64_t seed,
+                             one::CUDAGeneratorState* cuda_gen_state,
+                             const EmbeddingInitializer* initializer_param,
+                             const int8_t* initializer_index, const void* table_ids,
+                             const uint8_t* mask, T* values_ptr, V* embeddings_ptr) {
+  int32_t pack_size;
+  if (embedding_size % 4 == 0 && line_size % 4 == 0) {
+    pack_size = 4;
+  } else if (embedding_size % 2 == 0 && line_size % 2 == 0) {
+    pack_size = 2;
+  } else {
+    pack_size = 1;
+  }
+  int32_t embedding_num_pack = embedding_size / pack_size;
+  int32_t line_num_pack = line_size / pack_size;
+  int64_t value_elem_cnt = num_unique * line_size;
+  int64_t value_elem_num_pack = value_elem_cnt / pack_size;
+  const int64_t num_blocks = BlocksNum4ThreadsNum(value_elem_num_pack);
+  const uint64_t inc_offset = std::ceil(value_elem_cnt / num_blocks / kCudaThreadsNumPerBlock);
+  if (pack_size == 4) {
+    FusedInitSliceCast<T, U, V, 4><<<num_blocks, kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
+        value_elem_num_pack, seed, cuda_gen_state, inc_offset, line_size, embedding_size,
+        line_num_pack, embedding_num_pack, initializer_param, initializer_index,
+        reinterpret_cast<const U*>(table_ids), mask, reinterpret_cast<Pack<T, 4>*>(values_ptr),
+        reinterpret_cast<Pack<V, 4>*>(embeddings_ptr));
+  } else {
+    // TODO
+    UNIMPLEMENTED();
+  }
+}
+
+template<typename T, typename U, typename V, typename IDX>
 void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embedding_state,
                           const std::string& embedding_name, const int64_t parallel_id,
                           const int64_t num_ids, const int64_t embedding_size,
                           const int64_t line_size, const bool is_prefetch, int64_t current_iter,
                           const void* num_unique_ptr, const void* unique_ids, const void* table_ids,
-                          T* values_ptr, void* tmp_buffer_ptr, uint32_t* return_num_unique,
+                          T* values_ptr, V* embeddings_ptr, void* tmp_buffer_ptr,
                           embedding::ValuesPtr* ptrs) {
   const auto& generator = embedding_state->generator();
   CHECK_NOTNULL(generator);
@@ -425,22 +517,33 @@ void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embeddi
     store_values = need_value_buffer ? buffer_manager.template Ptr<T>(EmbeddingBufferType::kValues)
                                      : values_ptr;
   }
-  void* host_num_keys = embedding_state->HostNumKeys();
-  store->Get(stream, num_unique, unique_ids, store_values, num_missing_ptr, missing_indices);
-  CHECK_GE(sizeof(IDX), sizeof(uint32_t));  // host_num_keys's buffer size is sizeof(IDX)
-  OF_CUDA_CHECK(cudaMemcpyAsync(host_num_keys, num_missing_ptr, sizeof(uint32_t), cudaMemcpyDefault,
-                                cuda_stream));
-  CHECK_JUST(stream->Sync());
-  uint32_t num_missing = *reinterpret_cast<uint32_t*>(host_num_keys);
-  // init missing values
-  if (num_missing > 0) {
-    const int64_t elem_cnt = num_missing * line_size;
-    const int64_t num_blocks = BlocksNum4ThreadsNum(elem_cnt);
-    const uint64_t inc_offset = std::ceil(elem_cnt / num_blocks / kCudaThreadsNumPerBlock);
-    InitValueKernel<T, U><<<num_blocks, kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
-        seed, cuda_gen_state, inc_offset, line_size, embedding_size, initializer_param,
-        initializer_index, reinterpret_cast<const U*>(table_ids), num_missing_ptr, missing_indices,
-        store_values);
+  if (is_prefetch || ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_USE_MISSING", false)) {
+    void* host_num_keys = embedding_state->HostNumKeys();
+    store->Get(stream, num_unique, unique_ids, store_values, num_missing_ptr, missing_indices);
+    CHECK_GE(sizeof(IDX), sizeof(uint32_t));  // host_num_keys's buffer size is sizeof(IDX)
+    OF_CUDA_CHECK(cudaMemcpyAsync(host_num_keys, num_missing_ptr, sizeof(uint32_t),
+                                  cudaMemcpyDefault, cuda_stream));
+    CHECK_JUST(stream->Sync());
+    uint32_t num_missing = *reinterpret_cast<uint32_t*>(host_num_keys);
+    // init missing values
+    if (num_missing > 0) {
+      const int64_t elem_cnt = num_missing * line_size;
+      const int64_t num_blocks = BlocksNum4ThreadsNum(elem_cnt);
+      const uint64_t inc_offset = std::ceil(elem_cnt / num_blocks / kCudaThreadsNumPerBlock);
+      InitValueKernel<T, U><<<num_blocks, kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
+          seed, cuda_gen_state, inc_offset, line_size, embedding_size, initializer_param,
+          initializer_index, reinterpret_cast<const U*>(table_ids), num_missing_ptr,
+          missing_indices, store_values);
+    }
+  } else {
+    // reuse missing_indices buffer
+    // todo: use missing indices when not full cache
+    uint8_t* lookup_mask = reinterpret_cast<uint8_t*>(missing_indices);
+    store->Get(stream, num_unique, unique_ids, store_values, lookup_mask);
+    InitMissingAndSliceCast<T, U, V>(cuda_stream, num_unique, embedding_size, line_size, seed,
+                                     cuda_gen_state, initializer_param, initializer_index,
+                                     reinterpret_cast<const U*>(table_ids), lookup_mask,
+                                     store_values, embeddings_ptr);
   }
   if (is_prefetch) { store->Put(stream, num_unique, unique_ids, store_values); }
   if (is_prefetch && use_dynamic_memory_allocation) {
@@ -450,7 +553,6 @@ void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embeddi
     UNIMPLEMENTED();
 #endif
   }
-  *return_num_unique = num_unique;
 }
 
 template<typename T, typename U>
@@ -529,13 +631,12 @@ class EmbeddingPrefetchKernel final : public user_op::OpKernel {
     user_op::Tensor* tmp_buffer = ctx->Tensor4ArgNameAndIndex("tmp_buffer", 0);
     const int64_t embedding_size = ctx->Attr<int64_t>("embedding_size");
     const int64_t line_size = ctx->Attr<int64_t>("line_size");
-    uint32_t num_unique;
     T* values_ptr = nullptr;
-    LookupAndInitMissing<T, U, IDX>(
+    LookupAndInitMissing<T, U, T, IDX>(
         ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
         ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
         line_size, true, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
-        table_ids->dptr(), values_ptr, tmp_buffer->mut_dptr(), &num_unique, nullptr);
+        table_ids->dptr(), values_ptr, nullptr, tmp_buffer->mut_dptr(), nullptr);
     current_iter_++;
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
@@ -603,46 +704,50 @@ class EmbeddingLookupKernel final : public user_op::OpKernel {
     const int64_t embedding_size = ctx->Attr<int64_t>("embedding_size");
     const int64_t line_size = ctx->Attr<int64_t>("line_size");
     uint32_t num_unique;
-    if (embedding::UseDynamicMemoryAllocation()) {
-      embedding::ValuesPtr* ptrs = Global<embedding::EmbeddingManager>::Get()->GetValuesPtr(
-          ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
-      LookupAndInitMissing<T, U, IDX>(
-          ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
-          ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
-          line_size, false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
-          table_ids->dptr(), nullptr, tmp_buffer->mut_dptr(), &num_unique, ptrs);
-      if (ctx->has_output("embeddings", 0)) {
-        user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
-        const size_t lookup_embeddings_size = GetCudaAlignedSize(
-            num_unique * embedding_size * GetSizeOfDataType(embeddings->data_type()));
-        void* lookup_embeddings_ptr =
+    if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_SAVE_NUM_UNIQUE_MATRIX", true)) {
+      embedding::NumUniques* num_uniques =
+          Global<embedding::EmbeddingManager>::Get()->GetNumUniques(
+              ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
+      num_unique = num_uniques->GetNumUnique(current_iter_);
+    } else {
+      void* host_num_keys = embedding_state->HostNumKeys();
+      OF_CUDA_CHECK(cudaMemcpyAsync(host_num_keys, num_unique_ids->dptr(), sizeof(IDX),
+                                    cudaMemcpyDefault,
+                                    ctx->stream()->As<ep::CudaStream>()->cuda_stream()));
+      CHECK_JUST(ctx->stream()->Sync());
+      num_unique = *reinterpret_cast<IDX*>(host_num_keys);
+    }
+    void* lookup_embeddings_ptr;
+    if (ctx->has_output("embeddings", 0)) {
+      user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
+      const size_t lookup_embeddings_size = GetCudaAlignedSize(
+          num_unique * embedding_size * GetSizeOfDataType(embeddings->data_type()));
+      if (embedding::UseDynamicMemoryAllocation()) {
+        embedding::ValuesPtr* ptrs = Global<embedding::EmbeddingManager>::Get()->GetValuesPtr(
+            ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
+        lookup_embeddings_ptr =
             ptrs->MallocLookupEmbeddingsPtr(current_iter_, lookup_embeddings_size,
                                             ctx->stream()->As<ep::CudaStream>()->cuda_stream());
-        void* lookup_values_ptr = ptrs->GetLookupValuesPtr(current_iter_);
-        CopyValuesToEmbeddings<T>(ctx->stream(), num_unique, embedding_size, line_size,
-                                  unique_values->data_type(), embeddings->data_type(),
-                                  reinterpret_cast<T*>(lookup_values_ptr), lookup_embeddings_ptr);
+      } else {
+        lookup_embeddings_ptr = embeddings->mut_dptr();
       }
     } else {
-      LookupAndInitMissing<T, U, IDX>(
-          ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
-          ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
-          line_size, false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
-          table_ids->dptr(), unique_values->mut_dptr<T>(), tmp_buffer->mut_dptr(), &num_unique,
-          nullptr);
-      if (ctx->has_output("embeddings", 0)) {
-        user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
-        CopyValuesToEmbeddings<T>(ctx->stream(), num_unique, embedding_size, line_size,
-                                  unique_values->data_type(), embeddings->data_type(),
-                                  unique_values->dptr<T>(), embeddings->mut_dptr());
-      }
+      lookup_embeddings_ptr = nullptr;
     }
-    // if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_SAVE_NUM_UNIQUE_MATRIX", true)) {
-    //  embedding::NumUniques* num_uniques =
-    //      Global<embedding::EmbeddingManager>::Get()->GetNumUniques(
-    //          ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
-    //  num_uniques->SetNumUnique(num_unique, current_iter_);
-    //}
+    embedding::ValuesPtr* ptrs = nullptr;
+    if (embedding::UseDynamicMemoryAllocation()) {
+      ptrs = Global<embedding::EmbeddingManager>::Get()->GetValuesPtr(
+          ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
+    }
+    T* values_ptr = nullptr;
+    if (!embedding::UseDynamicMemoryAllocation()) { values_ptr = unique_values->mut_dptr<T>(); }
+    LookupAndInitMissing<T, U, half, IDX>(
+        ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
+        ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
+        line_size, false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
+        table_ids->dptr(), values_ptr, reinterpret_cast<half*>(lookup_embeddings_ptr),
+        tmp_buffer->mut_dptr(), ptrs);
+
     current_iter_++;
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
