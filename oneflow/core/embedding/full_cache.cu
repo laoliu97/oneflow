@@ -564,7 +564,7 @@ void CacheImpl<Key, Elem, Index>::Clear() {
 
 template<typename Key, typename Index>
 std::unique_ptr<Cache> DispatchValueType(const CacheOptions& options) {
-  if (options.value_type == DataType::kFloat) {
+  if (false && options.value_type == DataType::kFloat) {
     return std::unique_ptr<Cache>(new CacheImpl<Key, float, Index>(options));
   } else if (options.value_size % sizeof(ulonglong2) == 0) {
     return std::unique_ptr<Cache>(new CacheImpl<Key, ulonglong2, Index>(options));
