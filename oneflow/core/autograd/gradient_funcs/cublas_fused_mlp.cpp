@@ -201,15 +201,6 @@ Maybe<void> CublasFusedMLP::Apply(const CublasFusedMLPCaptureState* ctx,
     }
   }
 
-    if (ctx->x_requires_grad) {
-      // dx:
-      JUST(VectorAt(*in_grads, 0)) = matmul_async_grad->at(0);
-    }
-    if (JUST(VectorAt(ctx->weights_requires_grad, 0))) {
-      // dw:
-      JUST(VectorAt(*in_grads, 1)) = matmul_async_grad->at(1);
-    }
-  }
   return Maybe<void>::Ok();
 }
 

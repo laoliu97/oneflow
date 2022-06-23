@@ -210,8 +210,7 @@ void SetCublasAttr(const CublasFusedMLPKernelCache* matmul_grad_cache,
                    ep::primitive::BlasTransposeType transpose_a,
                    ep::primitive::BlasTransposeType transpose_b, cublasLtEpilogue_t epilogue,
                    const void* d_bias_ptr, const void* aux_ptr, size_t cublas_m, size_t cublas_n,
-                   size_t cublas_k, int64_t cublas_lda, int64_t cublas_ldb, int64_t cublas_ldc,
-                   size_t cublas_workspace_size) {
+                   size_t cublas_k, int64_t cublas_lda, int64_t cublas_ldb, int64_t cublas_ldc) {
   OF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(
       matmul_grad_cache->operation_desc, CUBLASLT_MATMUL_DESC_COMPUTE_TYPE, &cublas_compute_dtype,
       sizeof(cublas_compute_dtype)));
