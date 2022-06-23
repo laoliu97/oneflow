@@ -242,13 +242,13 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
       .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCUDA)                 \
                        && (user_op::HobDataType("x", 0) == GetDataType<dtype>::value)) \
       .SetInferTmpSizeFn([](user_op::InferContext* ctx) {                              \
-        const int64_t weight_size = ctx->input_size("weights");                         \
+        const int64_t weight_size = ctx->input_size("weights");                        \
         const Shape& dy_shape = ctx->InputShape("dy", 0);                              \
         int64_t m = dy_shape.At(0);                                                    \
         int64_t k = dy_shape.At(1);                                                    \
         int64_t tmp_buffer_size = 0;                                                   \
         for (int idx = weight_size - 1; idx > 0; idx--) {                              \
-          const Shape& weight_shape = ctx->InputShape("weights", idx);                  \
+          const Shape& weight_shape = ctx->InputShape("weights", idx);                 \
           k = weight_shape.At(1);                                                      \
           tmp_buffer_size += GetCudaAlignedSize(m * k * sizeof(dtype));                \
         }                                                                              \

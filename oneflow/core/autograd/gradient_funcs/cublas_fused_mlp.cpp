@@ -129,10 +129,10 @@ Maybe<void> CublasFusedMLP::Apply(const CublasFusedMLPCaptureState* ctx,
   }
 
   std::shared_ptr<one::Tensor> cublas_dy = last_bias_dy;
-  if(weight_num > 2){
-    // Use Fully Fused MLP Backward. 
+  if (weight_num > 2) {
+    // Use Fully Fused MLP Backward.
     const auto& fused_mlp_grad = JUST(functional::FusedMLPGrad(
-      cublas_dy, JUST(VectorAt(ctx->SavedTensors(), 0)), weights, cublas_auxs, hiddens));
+        cublas_dy, JUST(VectorAt(ctx->SavedTensors(), 0)), weights, cublas_auxs, hiddens));
 
     if (ctx->x_requires_grad) {
       // dx:
@@ -155,7 +155,7 @@ Maybe<void> CublasFusedMLP::Apply(const CublasFusedMLPCaptureState* ctx,
       }
     }
   } else {
-    // Use Multiple kernels to compute Grad. 
+    // Use Multiple kernels to compute Grad.
     for (int32_t hidden_layer_idx = weight_num - 1; hidden_layer_idx > 0; hidden_layer_idx--) {
       // If it is final layer, we use out_grads[0] as dy.
       if (hidden_layer_idx != weight_num - 1) {
@@ -183,7 +183,6 @@ Maybe<void> CublasFusedMLP::Apply(const CublasFusedMLPCaptureState* ctx,
       if (JUST(VectorAt(ctx->weights_requires_grad, hidden_layer_idx))) {
         JUST(VectorAt(*in_grads, (1 + hidden_layer_idx))) = matmul_relu_bias_bgrad->at(2);
       }
-
     }
 
     // For the first layer, we need to use 2 matmul to get grads.
