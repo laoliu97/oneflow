@@ -985,17 +985,12 @@
 
 - name: "cublas_bias_add_relu_matmul_grad"
   signature:
-    "TensorTuple (Tensor dy, Tensor weight, Tensor aux, Tensor hidden, Double alpha=1.0) => CublasBiasAddReluMatmulGrad"
+    "TensorTuple (Tensor dy, Tensor weight, Tensor aux, Double alpha=1.0) => CublasBiasAddReluMatmulGrad"
   bind_python: False
 
 - name: "cublas_matmul_bias_add_grad"
   signature:
     "TensorTuple (Tensor dy, Tensor x) => CublasMatmulBiasAddGrad"
-  bind_python: False
-
-- name: "matmul_async_grad"
-  signature:
-    "TensorTuple (Tensor dy, Tensor x, Tensor weight) => MatmulAsyncGrad"
   bind_python: False
 
 - name: "fused_mlp_grad"
