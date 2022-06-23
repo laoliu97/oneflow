@@ -477,6 +477,22 @@ void ScaleGrad(JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* job_builder
   }
 }
 
+bool IsSupportFusedUpdatePut(const bool enable_auto_mixed_precision, const bool is_sgd,
+                             const std::string& down_scale_by_lbn, const std::string& skip_if_lbn,
+                             const float l1, const float l2, const float weight_decay) {
+  if (!enable_auto_mixed_precision) { return false; }
+  if (!is_sgd) { return false; }
+  if (!ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_GRADIENT_SHUFFLE_USE_FP16", true)) {
+    return false;
+  }
+  if (!down_scale_by_lbn.empty()) { return false; }
+  if (!skip_if_lbn.empty()) { return false; }
+  if (l1 != 0) { return false; }
+  if (l2 != 0) { return false; }
+  if (weight_decay != 0) { return false; }
+  return true;
+}
+
 void BuildEmbeddingUpdate(JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* job_builder,
                           const ParallelConf& embedding_parallel_conf,
                           const int64_t embedding_scope_symbol_id, const int64_t embedding_size,
@@ -492,6 +508,37 @@ void BuildEmbeddingUpdate(JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* 
   const TrainConf& train_conf = job_builder->job().job_conf().train_conf();
   const bool has_clip_grad = optimizer_conf.has_clip_conf();
   *new_embedding_grad_lbn = embedding_grad_lbn;
+  std::string update_skip_if_lbn;
+  std::string fuse_to_update_down_scale_by_lbn;
+  double fuse_to_update_scale = 1.0;
+  ScaleGrad(ctx, op_graph, job_builder, embedding_parallel_conf, embedding_scope_symbol_id,
+            has_clip_grad, embedding_grad_lbn, new_embedding_grad_lbn, &update_skip_if_lbn,
+            &fuse_to_update_down_scale_by_lbn, &fuse_to_update_scale);
+
+  if (IsSupportFusedUpdatePut(ctx->job_desc().enable_auto_mixed_precision(),
+                              optimizer_conf.has_naive_conf(), fuse_to_update_down_scale_by_lbn,
+                              update_skip_if_lbn, l1, l2,
+                              optimizer_conf.weight_decay_conf().weight_decay_rate())) {
+    user_op::UserOpConfWrapperBuilder fused_embedding_update_put_op_builder(
+        embedding_op.op_name() + "_fused_embedding_update_put");
+    user_op::UserOpConfWrapper fused_embedding_update_put_op =
+        fused_embedding_update_put_op_builder.OpTypeName("fused_sgd_embedding_update_put")
+            .Input("num_unique_ids", num_unique_ids_lbn)
+            .Input("unique_ids", unique_ids_lbn)
+            .Input("unique_embeddings", unique_values_lbn)
+            .Input("embedding_grad", *new_embedding_grad_lbn)
+            .Input("learning_rate", learning_rate_lbn)
+            .Attr<double>("scale", fuse_to_update_scale)
+            .Attr<std::string>("embedding_name", embedding_name)
+            .Attr<int64_t>("embedding_size", embedding_size)
+            .Attr<int64_t>("line_size", line_size)
+            .ScopeSymbolId(embedding_scope_symbol_id)
+            .Build();
+    *embedding_update_new_op_conf = fused_embedding_update_put_op.op_conf();
+    embedding_update_new_op_conf->set_stream_name_hint(embedding_name + "_EMBEDDING");
+    return;
+  }
+
   auto AddAdamBiasCorrectionFactorOp = [&](float beta_val,
                                            const std::string& op_name) -> std::string {
     user_op::UserOpConfWrapperBuilder op_builder(embedding_op.op_name() + op_name);
@@ -551,12 +598,6 @@ void BuildEmbeddingUpdate(JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* 
   MakeConstantInitializerAttr(embedding_size, line_size, state_constant_init_values,
                               state_initializer);
 
-  std::string update_skip_if_lbn;
-  std::string fuse_to_update_down_scale_by_lbn;
-  double fuse_to_update_scale = 1.0;
-  ScaleGrad(ctx, op_graph, job_builder, embedding_parallel_conf, embedding_scope_symbol_id,
-            has_clip_grad, embedding_grad_lbn, new_embedding_grad_lbn, &update_skip_if_lbn,
-            &fuse_to_update_down_scale_by_lbn, &fuse_to_update_scale);
   embedding_update_op_builder.Input("num_unique_ids", num_unique_ids_lbn)
       .Input("unique_embeddings", unique_values_lbn)
       .Input("learning_rate", learning_rate_lbn)

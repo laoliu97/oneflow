@@ -834,4 +834,70 @@ class EmbeddingPutKernel final : public user_op::OpKernel {
 
 OF_PP_FOR_EACH_TUPLE(REGISTER_CUDA_EMBEDDING_PUT_KERNEL, IDX_DATA_TYPE_SEQ)
 
+template<typename IDX>
+class FusedSgdEmbeddingUpdatePutKernel final : public user_op::OpKernel {
+ public:
+  FusedSgdEmbeddingUpdatePutKernel() : current_iter_(0){};
+  ~FusedSgdEmbeddingUpdatePutKernel() override = default;
+
+  std::shared_ptr<user_op::OpKernelState> CreateOpKernelState(
+      user_op::KernelInitContext* ctx) const override {
+    return std::make_shared<EmbeddingPutKernelState<IDX>>(ctx);
+  }
+
+ private:
+  using user_op::OpKernel::Compute;
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
+    auto* embedding_state = dynamic_cast<EmbeddingPutKernelState<IDX>*>(state);
+    CHECK(embedding_state != nullptr);
+    embedding::KeyValueStore* store = embedding_state->KeyValueStore();
+    const user_op::Tensor* num_unique_ids = ctx->Tensor4ArgNameAndIndex("num_unique_ids", 0);
+    const user_op::Tensor* unique_ids = ctx->Tensor4ArgNameAndIndex("unique_ids", 0);
+    const user_op::Tensor* embedding_grad = ctx->Tensor4ArgNameAndIndex("embedding_grad", 0);
+    const user_op::Tensor* learning_rate = ctx->Tensor4ArgNameAndIndex("learning_rate", 0);
+    const float* learning_rate_ptr = learning_rate->dptr<float>();
+    const auto scale = ctx->Attr<double>("scale");
+    uint32_t num_unique;
+    if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_SAVE_NUM_UNIQUE_MATRIX", true)) {
+      embedding::NumUniques* num_uniques =
+          Global<embedding::EmbeddingManager>::Get()->GetNumUniques(
+              ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
+      num_unique = num_uniques->GetNumUnique(current_iter_);
+    } else {
+      IDX* host_num_keys = reinterpret_cast<IDX*>(embedding_state->HostNumKeys());
+      OF_CUDA_CHECK(cudaMemcpyAsync(host_num_keys, num_unique_ids->dptr(), sizeof(IDX),
+                                    cudaMemcpyDefault,
+                                    ctx->stream()->As<ep::CudaStream>()->cuda_stream()));
+      CHECK_JUST(ctx->stream()->Sync());
+      num_unique = *host_num_keys;
+    }
+    const void* unique_embeddings_ptr;
+    if (embedding::UseDynamicMemoryAllocation()) {
+      embedding::ValuesPtr* ptrs = Global<embedding::EmbeddingManager>::Get()->GetValuesPtr(
+          ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
+      unique_embeddings_ptr = ptrs->GetLookupValuesPtr(current_iter_);
+    } else {
+      const user_op::Tensor* unique_embeddings =
+          ctx->Tensor4ArgNameAndIndex("unique_embeddings", 0);
+      unique_embeddings_ptr = unique_embeddings->dptr();
+    }
+    store->FusedHalfUpdatePut(ctx->stream(), num_unique, unique_ids->dptr(), unique_embeddings_ptr,
+                              embedding_grad->dptr(), learning_rate_ptr, scale);
+    current_iter_++;
+  }
+  bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
+  mutable int64_t current_iter_;
+};
+
+#define REGISTER_CUDA_FUSED_SGD_EMBEDDING_UPDATE_PUT_KERNEL(dtype, typeproto)                \
+  REGISTER_USER_KERNEL("fused_sgd_embedding_update_put")                                     \
+      .SetCreateFn<FusedSgdEmbeddingUpdatePutKernel<dtype>>()                                \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCUDA)                       \
+                       && (user_op::HobDataType("num_unique_ids", 0) == typeproto)           \
+                       && (user_op::HobDataType("unique_embeddings", 0) == DataType::kFloat) \
+                       && (user_op::HobDataType("embedding_grad", 0) == DataType::kFloat16));
+
+OF_PP_FOR_EACH_TUPLE(REGISTER_CUDA_FUSED_SGD_EMBEDDING_UPDATE_PUT_KERNEL, IDX_DATA_TYPE_SEQ)
+
 }  // namespace oneflow
