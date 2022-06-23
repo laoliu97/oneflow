@@ -28,6 +28,7 @@ namespace oneflow {
 namespace {
 
 constexpr int32_t kAuxReluLdAlignRequirement = 128;
+constexpr size_t kDefaultWorkspaceSize = 4 * 1024 * 1024;  // 4M
 
 long AlignReluAuxLd(long aux_ld) {
   /*
@@ -187,10 +188,8 @@ void SetCublasEpilogue(const CublasFusedMLPKernelCache* matmul_cache, cublasLtEp
     OF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmul_cache->operation_desc,
                                                    CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr,
                                                    sizeof(bias_ptr)));
-    // Error::UnimplementedError() << "Unsupported Epilogue. ";
   }
 
-  // TODO: Support GELU_AUX_BIAS
   if (epilogue == CUBLASLT_EPILOGUE_RELU_AUX_BIAS || epilogue == CUBLASLT_EPILOGUE_DRELU_BGRAD) {
     // Set aux ptr for backward.
     OF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmul_cache->operation_desc,
@@ -217,17 +216,9 @@ void SetCublasAttr(const CublasFusedMLPKernelCache* matmul_grad_cache,
       matmul_grad_cache->operation_desc, CUBLASLT_MATMUL_DESC_COMPUTE_TYPE, &cublas_compute_dtype,
       sizeof(cublas_compute_dtype)));
 
-  // For best performance when using the bias vector, specify beta == 0 and
-  // CUBLASLT_POINTER_MODE_HOST.(from
-  // https://docs.nvidia.com/cuda/cublas/index.html#cublasLtPointerMode_t)
-  // cublasLtPointerMode_t mode = CUBLASLT_POINTER_MODE_HOST;
-  // OF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(
-  //     matmul_grad_cache->operation_desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &mode,
-  //     sizeof(mode)));
-
   OF_CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(
       matmul_grad_cache->cublas_preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-      &cublas_workspace_size, sizeof(cublas_workspace_size)));
+      &kDefaultWorkspaceSize, sizeof(kDefaultWorkspaceSize)));
 
   uint32_t pointer_mode = CUBLASLT_POINTER_MODE_MASK_HOST;
   OF_CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(matmul_grad_cache->cublas_preference,

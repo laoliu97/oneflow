@@ -24,32 +24,28 @@ namespace oneflow {
 namespace {
 
 Maybe<void> InferTensorDesc4FusedMatmulBackward(user_op::InferContext* ctx) {
-  const int64_t weight_size = ctx->input_size("weights");
+  const int64_t weight_num = ctx->input_size("weights");
   const user_op::TensorDesc& x_desc = ctx->InputTensorDesc("x", 0);
-  const user_op::TensorDesc& dy_desc = ctx->InputTensorDesc("dy", 0);
-  for (int idx = weight_size - 1; idx > -1; idx--) {
+  for (int idx = weight_num - 1; idx > -1; idx--) {
     const user_op::TensorDesc& weight_desc = ctx->InputTensorDesc("weights", idx);
     *ctx->OutputShape("d_weights", idx) = weight_desc.shape();
-    // this bias grad is previous layer, so here is weight_shape(1)
-    if (idx != 0) { *ctx->OutputShape("d_biases", idx - 1) = Shape({weight_desc.shape().At(1)}); }
+    *ctx->OutputShape("d_biases", idx) = Shape({weight_desc.shape().At(0)});
   }
   *ctx->OutputShape("d_grad", 0) = x_desc.shape();
   return Maybe<void>::Ok();
 }
 
 Maybe<void> InferDataType4MatmulBackward(user_op::InferContext* ctx) {
-  const int64_t weight_size = ctx->input_size("weights");
-  const int64_t dweight_size = ctx->output_size("d_weights");
-  CHECK_EQ(weight_size, dweight_size) << "The number of weights and d_weights should be equal. ";
+  const int64_t weight_num = ctx->input_size("weights");
+  const int64_t dweight_num = ctx->output_size("d_weights");
+  CHECK_EQ(weight_num, dweight_num) << "The number of weights and d_weights should be equal. ";
   const int64_t dbias_size = ctx->output_size("d_biases");
-  CHECK_EQ(weight_size - 1, dbias_size)
-      << "The number of d_biases should be equal to weight_size - 1. Because last layer's "
-         "bias_grad is computed by ReduceSum. ";
+  CHECK_EQ(weight_num, dbias_size) << "The number of d_biases should be equal to weight_num. "
+                                      "Because last layer's bias_grad is computed by ReduceSum. ";
   const user_op::TensorDesc& dy_desc = ctx->InputTensorDesc("dy", 0);
-  for (int idx = weight_size - 1; idx > -1; idx--) {
-    const user_op::TensorDesc& weight_desc = ctx->InputTensorDesc("weights", idx);
+  for (int idx = weight_num - 1; idx > -1; idx--) {
     *ctx->OutputDType("d_weights", idx) = dy_desc.data_type();
-    if (idx != 0) { *ctx->OutputDType("d_biases", idx - 1) = dy_desc.data_type(); }
+    *ctx->OutputDType("d_biases", idx) = dy_desc.data_type();
   }
   *ctx->OutputDType("d_grad", 0) = dy_desc.data_type();
   return Maybe<void>::Ok();
@@ -79,12 +75,24 @@ Maybe<void> InferDataType4MatmulBackward(user_op::InferContext* ctx) {
   }
 
   builder.Split(user_op::OpArg("d_grad", 0), 0);
-  for (int i = 0; i < ctx->user_op_conf().output_size("d_biases"); ++i) {
-    builder.PartialSum(user_op::OpArg("d_biases", i));
+  if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_FUSED_MLP_GRAD_OVERLAP_ALLREDUCE", false)) {
+    // FusedMLPGradKernel do allreduce for dbias and dweight, so here convert from PartialSum to
+    // Broadcast.
+    for (int i = 0; i < ctx->user_op_conf().output_size("d_biases"); ++i) {
+      builder.Broadcast(user_op::OpArg("d_biases", i));
+    }
+    for (int i = 0; i < ctx->user_op_conf().output_size("d_weights"); ++i) {
+      builder.Broadcast(user_op::OpArg("d_weights", i));
+    }
+  } else {
+    for (int i = 0; i < ctx->user_op_conf().output_size("d_biases"); ++i) {
+      builder.PartialSum(user_op::OpArg("d_biases", i));
+    }
+    for (int i = 0; i < ctx->user_op_conf().output_size("d_weights"); ++i) {
+      builder.PartialSum(user_op::OpArg("d_weights", i));
+    }
   }
-  for (int i = 0; i < ctx->user_op_conf().output_size("d_weights"); ++i) {
-    builder.PartialSum(user_op::OpArg("d_weights", i));
-  }
+
   builder.Build();
   return Maybe<void>::Ok();
 }
