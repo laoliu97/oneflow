@@ -529,10 +529,11 @@ void CacheImpl<Key, Elem, Index, pack_size>::Get(ep::Stream* stream, uint32_t n_
           encoder_.table_keys(), encoder_.table_indices());
 }
 
-template<typename Key, typename Elem, typename Index>
-void CacheImpl<Key, Elem, Index>::Put(ep::Stream* stream, uint32_t n_keys, const void* keys,
-                                      const void* values, uint32_t* n_evicted, void* evicted_keys,
-                                      void* evicted_values) {
+template<typename Key, typename Elem, typename Index, size_t pack_size>
+void CacheImpl<Key, Elem, Index, pack_size>::Put(ep::Stream* stream, uint32_t n_keys,
+                                                 const void* keys, const void* values,
+                                                 uint32_t* n_evicted, void* evicted_keys,
+                                                 void* evicted_values) {
   if (n_keys == 0) { return; }
   CHECK_LE(n_keys, max_query_length_);
   encoder_.template Encode<true>(stream, n_keys, static_cast<const Key*>(keys), encoding_buffer_);

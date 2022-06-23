@@ -139,7 +139,7 @@ class CublasBiasAddReluMatmulGradKernel final : public user_op::OpKernel,
 
     // currently only support 2D matmul.
     DimVector hidden_shape(2);
-    hidden->shape().ToDimVector(&hidden_shape);
+    hidden->shape_view().ToDimVector(&hidden_shape);
     epilogue = CUBLASLT_EPILOGUE_DEFAULT;
 
     InferMatmulCublasMNK(dy_shape, hidden_shape,

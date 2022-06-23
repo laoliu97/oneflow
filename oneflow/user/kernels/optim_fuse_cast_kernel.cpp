@@ -59,8 +59,8 @@ class OptimFuseCast final : public OpKernel {
     if (!cast_flag) { return; }
     const Tensor* input_tensor = ctx->Tensor4ArgNameAndIndex("in", 0);
     Tensor* output_tensor = ctx->Tensor4ArgNameAndIndex("out", 0);
-    const int64_t elem_cnt = input_tensor->shape().elem_cnt();
-    CHECK_EQ(output_tensor->shape().elem_cnt(), elem_cnt);
+    const int64_t elem_cnt = input_tensor->shape_view().elem_cnt();
+    CHECK_EQ(output_tensor->shape_view().elem_cnt(), elem_cnt);
     auto cast_primitive = NewCastPrimitive(ctx);
     CHECK(cast_primitive);
     cast_primitive->Launch(ctx->stream(), input_tensor->dptr(), output_tensor->mut_dptr(),

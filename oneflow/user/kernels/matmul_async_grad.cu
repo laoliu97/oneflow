@@ -101,9 +101,9 @@ class MatmulAsyncGradKernel final : public user_op::OpKernel, public user_op::Cu
 
     // currently only support 2D matmul.
     DimVector dy_shape(2);
-    dy->shape().ToDimVector(&dy_shape);
+    dy->shape_view().ToDimVector(&dy_shape);
     DimVector weight_shape(2);
-    weight->shape().ToDimVector(&weight_shape);
+    weight->shape_view().ToDimVector(&weight_shape);
     cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_DEFAULT;
 
     InferMatmulCublasMNK(dy_shape, weight_shape,
@@ -131,7 +131,7 @@ class MatmulAsyncGradKernel final : public user_op::OpKernel, public user_op::Cu
 
     // currently only support 2D matmul.
     DimVector x_shape(2);
-    x->shape().ToDimVector(&x_shape);
+    x->shape_view().ToDimVector(&x_shape);
     InferMatmulCublasMNK(dy_shape, x_shape,
                          /*transpose_a=*/ep::primitive::BlasTransposeType::T,
                          /*transpose_b=*/ep::primitive::BlasTransposeType::N, &cublas_m, &cublas_n,

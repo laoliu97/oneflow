@@ -1186,7 +1186,7 @@ class EmbeddingShuffleKernelDynamicMemoryAlloc final : public user_op::OpKernel 
     const int64_t embedding_size = ctx->Attr<int64_t>("embedding_size");
     IDX* host_num_unique_matrix = kernel_state->HostNumUniqueMatrix();
     DataType data_type = cur_rank_embeddings->data_type();
-    const int64_t num_ids = inverse_unique_partition_indices->shape().elem_cnt();
+    const int64_t num_ids = inverse_unique_partition_indices->shape_view().elem_cnt();
     const int64_t parallel_num = ctx->parallel_ctx().parallel_num();
     const int64_t parallel_id = ctx->parallel_ctx().parallel_id();
     bool enable_quantized_comm_env_var =
@@ -1655,7 +1655,7 @@ class EmbeddingGradientShuffleKernel final : public user_op::OpKernel {
       UniqueCurRankEmbeddingGrad<T, IDX>(
           ctx->stream(), data_type, cur_rank_num_ids, num_unique, embedding_size,
           padded_embedding_size, only_memset_num_unique_grad,
-          cur_rank_unique_embedding_grad->shape().elem_cnt(), received_embedding_grad,
+          cur_rank_unique_embedding_grad->shape_view().elem_cnt(), received_embedding_grad,
           reinterpret_cast<const IDX*>(cur_rank_inverse_indices->dptr()),
           cur_rank_unique_embedding_grad->mut_dptr<T>(), buffer_ptr);
     } else {
@@ -1729,7 +1729,8 @@ class EmbeddingGradientShuffleKernel final : public user_op::OpKernel {
       UniqueCurRankEmbeddingGrad<T, IDX>(
           ctx->stream(), data_type, cur_rank_num_ids, num_unique, embedding_size,
           padded_embedding_size, only_memset_num_unique_grad,
-          cur_rank_unique_embedding_grad->shape().elem_cnt(), dequantize_cur_rank_embedding_grad,
+          cur_rank_unique_embedding_grad->shape_view().elem_cnt(),
+          dequantize_cur_rank_embedding_grad,
           reinterpret_cast<const IDX*>(cur_rank_inverse_indices->dptr()),
           cur_rank_unique_embedding_grad->mut_dptr<T>(), buffer_ptr);
     }
@@ -1817,7 +1818,7 @@ class EmbeddingGradientShuffleDynamicMemoryAllocKernel final : public user_op::O
     const bool only_memset_num_unique_grad = ctx->Attr<bool>("only_memset_num_unique_grad");
     IDX* host_num_unique_matrix = kernel_state->HostNumUniqueMatrix();
     DataType data_type = embedding_grad->data_type();
-    const int64_t num_ids = inverse_unique_partition_indices->shape().elem_cnt();
+    const int64_t num_ids = inverse_unique_partition_indices->shape_view().elem_cnt();
     const int64_t parallel_num = ctx->parallel_ctx().parallel_num();
     const int64_t parallel_id = ctx->parallel_ctx().parallel_id();
     const int64_t padded_embedding_size = GetPaddedEmbeddingSize(data_type, embedding_size);
@@ -1887,7 +1888,7 @@ class EmbeddingGradientShuffleDynamicMemoryAllocKernel final : public user_op::O
       UniqueCurRankEmbeddingGrad<T, IDX>(
           ctx->stream(), data_type, cur_rank_num_ids, num_unique, embedding_size,
           padded_embedding_size, only_memset_num_unique_grad,
-          cur_rank_unique_embedding_grad->shape().elem_cnt(), received_embedding_grad,
+          cur_rank_unique_embedding_grad->shape_view().elem_cnt(), received_embedding_grad,
           reinterpret_cast<const IDX*>(cur_rank_inverse_indices->dptr()),
           cur_rank_unique_embedding_grad->mut_dptr<T>(), nullptr);
       OF_CUDA_CHECK(cudaFreeAsync(received_embedding_grad, cuda_stream));
@@ -1970,7 +1971,8 @@ class EmbeddingGradientShuffleDynamicMemoryAllocKernel final : public user_op::O
       UniqueCurRankEmbeddingGrad<T, IDX>(
           ctx->stream(), data_type, cur_rank_num_ids, num_unique, embedding_size,
           padded_embedding_size, only_memset_num_unique_grad,
-          cur_rank_unique_embedding_grad->shape().elem_cnt(), dequantize_cur_rank_embedding_grad,
+          cur_rank_unique_embedding_grad->shape_view().elem_cnt(),
+          dequantize_cur_rank_embedding_grad,
           reinterpret_cast<const IDX*>(cur_rank_inverse_indices->dptr()),
           cur_rank_unique_embedding_grad->mut_dptr<T>(), nullptr);
       OF_CUDA_CHECK(cudaFreeAsync(dequantize_cur_rank_embedding_grad, cuda_stream));

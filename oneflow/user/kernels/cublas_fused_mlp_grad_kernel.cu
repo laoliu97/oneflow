@@ -108,7 +108,7 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
     DimVector dy_shape(2);
     DimVector weight_shape(2);
     DimVector hidden_shape(2);
-    dy->shape().ToDimVector(&dy_shape);
+    dy->shape_view().ToDimVector(&dy_shape);
     const void* dgrad_buf = dy->dptr();
 
     for (int idx = weight_size - 1; idx > -1; idx--) {
@@ -117,7 +117,7 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
         const user_op::Tensor* aux = ctx->Tensor4ArgNameAndIndex("cublas_aux", idx - 1);
         user_op::Tensor* d_bias = ctx->Tensor4ArgNameAndIndex("d_biases", idx - 1);
 
-        weight->shape().ToDimVector(&weight_shape);
+        weight->shape_view().ToDimVector(&weight_shape);
         epilogue = CUBLASLT_EPILOGUE_DRELU_BGRAD;
         InferMatmulCublasMNK(dy_shape, weight_shape,
                              /*transpose_a=*/ep::primitive::BlasTransposeType::N,
@@ -142,7 +142,7 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
             cuda_stream->cuda_stream()));
       } else {
         const user_op::Tensor* weight = ctx->Tensor4ArgNameAndIndex("weights", 0);
-        weight->shape().ToDimVector(&weight_shape);
+        weight->shape_view().ToDimVector(&weight_shape);
         epilogue = CUBLASLT_EPILOGUE_DEFAULT;
         InferMatmulCublasMNK(dy_shape, weight_shape,
                              /*transpose_a=*/ep::primitive::BlasTransposeType::N,
@@ -175,7 +175,7 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
       if (idx != 0) {
         const user_op::Tensor* hidden = ctx->Tensor4ArgNameAndIndex("hidden", idx - 1);  // here
         user_op::Tensor* d_weights = ctx->Tensor4ArgNameAndIndex("d_weights", idx);
-        hidden->shape().ToDimVector(&hidden_shape);
+        hidden->shape_view().ToDimVector(&hidden_shape);
 
         epilogue = CUBLASLT_EPILOGUE_DEFAULT;
 
@@ -208,7 +208,7 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
         dy_tmp_buf = reinterpret_cast<void*>(tmp_buffer->mut_dptr<char>() + offset);
       } else {
         user_op::Tensor* d_weights = ctx->Tensor4ArgNameAndIndex("d_weights", 0);
-        x->shape().ToDimVector(&hidden_shape);
+        x->shape_view().ToDimVector(&hidden_shape);
         epilogue = CUBLASLT_EPILOGUE_DEFAULT;
         InferMatmulCublasMNK(dy_shape, hidden_shape,
                              /*transpose_a=*/ep::primitive::BlasTransposeType::T,
