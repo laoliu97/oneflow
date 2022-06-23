@@ -634,7 +634,7 @@ class EmbeddingPrefetchKernel final : public user_op::OpKernel {
     T* values_ptr = nullptr;
     LookupAndInitMissing<T, U, T, IDX>(
         ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
-        ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
+        ctx->parallel_ctx().parallel_id(), unique_ids->shape_view().elem_cnt(), embedding_size,
         line_size, true, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
         table_ids->dptr(), values_ptr, nullptr, tmp_buffer->mut_dptr(), nullptr);
     current_iter_++;
@@ -743,7 +743,7 @@ class EmbeddingLookupKernel final : public user_op::OpKernel {
     if (!embedding::UseDynamicMemoryAllocation()) { values_ptr = unique_values->mut_dptr<T>(); }
     LookupAndInitMissing<T, U, half, IDX>(
         ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
-        ctx->parallel_ctx().parallel_id(), unique_ids->shape().elem_cnt(), embedding_size,
+        ctx->parallel_ctx().parallel_id(), unique_ids->shape_view().elem_cnt(), embedding_size,
         line_size, false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
         table_ids->dptr(), values_ptr, reinterpret_cast<half*>(lookup_embeddings_ptr),
         tmp_buffer->mut_dptr(), ptrs);
