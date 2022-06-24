@@ -548,8 +548,6 @@ void CacheImpl<Key, Elem, Index, pack_size>::FusedHalfUpdatePut(
     ep::Stream* stream, uint32_t n_keys, const void* keys, const void* values, const void* update,
     const float* lr, float scale, uint32_t* n_evicted, void* evicted_keys, void* evicted_values) {
   if (!std::is_same<Elem, float>::value) { UNIMPLEMENTED(); }
-  OF_CUDA_CHECK(
-      cudaMemsetAsync(n_evicted, 0, sizeof(uint32_t), stream->As<ep::CudaStream>()->cuda_stream()));
   if (n_keys == 0) { return; }
   CHECK_LE(n_keys, max_query_length_);
   encoder_.template Encode<true>(stream, n_keys, static_cast<const Key*>(keys), encoding_buffer_);
