@@ -313,20 +313,22 @@ class CublasFusedMLPGradKernel final : public user_op::OpKernel, public user_op:
 
       // Do Allreduce for d_bias and d_weight.
       // Here we wait wgrad event, and set a ncclGroup to Allreduce d_bias and d_weight.
-      OF_CUDA_CHECK(cudaStreamWaitEvent(kernel_state->allreduce_stream(), dweight_event));
-      OF_NCCL_CHECK(ncclGroupStart());
-      OF_NCCL_CHECK(ncclAllReduce(d_bias->mut_dptr(), d_bias->mut_dptr(),
-                                  d_bias->shape_view().elem_cnt(),
-                                  GetNcclDataType(d_bias->data_type()), ncclRedOp_t::ncclSum, comm,
-                                  kernel_state->allreduce_stream()));
-      OF_NCCL_CHECK(ncclAllReduce(d_weight->mut_dptr(), d_weight->mut_dptr(),
-                                  d_weight->shape_view().elem_cnt(),
-                                  GetNcclDataType(d_weight->data_type()), ncclRedOp_t::ncclSum,
-                                  comm, kernel_state->allreduce_stream()));
-      OF_NCCL_CHECK(ncclGroupEnd());
-      if (idx == 0) {
-        // We should sync allreduce before the kernel finish.
-        OF_CUDA_CHECK(cudaEventRecord(allreduce_event, kernel_state->allreduce_stream()));
+      if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_FUSED_MLP_GRAD_OVERLAP_ALLREDUCE", false)) {
+        OF_CUDA_CHECK(cudaStreamWaitEvent(kernel_state->allreduce_stream(), dweight_event));
+        OF_NCCL_CHECK(ncclGroupStart());
+        OF_NCCL_CHECK(ncclAllReduce(d_bias->mut_dptr(), d_bias->mut_dptr(),
+                                    d_bias->shape_view().elem_cnt(),
+                                    GetNcclDataType(d_bias->data_type()), ncclRedOp_t::ncclSum,
+                                    comm, kernel_state->allreduce_stream()));
+        OF_NCCL_CHECK(ncclAllReduce(d_weight->mut_dptr(), d_weight->mut_dptr(),
+                                    d_weight->shape_view().elem_cnt(),
+                                    GetNcclDataType(d_weight->data_type()), ncclRedOp_t::ncclSum,
+                                    comm, kernel_state->allreduce_stream()));
+        OF_NCCL_CHECK(ncclGroupEnd());
+        if (idx == 0) {
+          // We should sync allreduce before the kernel finish.
+          OF_CUDA_CHECK(cudaEventRecord(allreduce_event, kernel_state->allreduce_stream()));
+        }
       }
     }
     if (ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_FUSED_MLP_GRAD_OVERLAP_ALLREDUCE", false)) {
