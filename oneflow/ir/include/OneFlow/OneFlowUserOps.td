@@ -4558,13 +4558,11 @@ def OneFlow_CublasBiasAddReluMatmulGradOp : OneFlow_BaseOp<"cublas_bias_add_relu
   let input = (ins
     OneFlow_Tensor:$dy,
     OneFlow_Tensor:$weight,
-    OneFlow_Tensor:$aux, 
-    OneFlow_Tensor:$hidden
+    OneFlow_Tensor:$aux
   );
   let output = (outs
     OneFlow_Tensor:$d_grad, 
-    OneFlow_Tensor:$d_bias, 
-    OneFlow_Tensor:$d_weight
+    OneFlow_Tensor:$d_bias
   );
   let attrs = (ins
     DefaultValuedAttr<F64Attr, "1.">:$alpha
@@ -9566,7 +9564,7 @@ def OneFlow_EmbeddingLookupOp : OneFlow_BaseOp<"embedding_lookup", [NoSideEffect
   let has_data_type_infer_fn = 1;
 }
 
-def OneFlow_FusedSgdEmbeddingUpdatePutOp : OneFlow_BaseOp<"fused_sgd_embedding_update_put", [AttrSizedOperandSegments, DeclareOpInterfaceMethods<UserOpCompatibleInterface>]> {
+def OneFlow_FusedSgdEmbeddingUpdatePutOp : OneFlow_BaseOp<"fused_sgd_embedding_update_put", [DeclareOpInterfaceMethods<UserOpCompatibleInterface>]> {
   let input = (ins
     OneFlow_Tensor:$num_unique_ids,
     OneFlow_Tensor:$unique_ids,
