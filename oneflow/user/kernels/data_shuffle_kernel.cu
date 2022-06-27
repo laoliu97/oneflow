@@ -1808,13 +1808,7 @@ class EmbeddingGradientShuffleDynamicMemoryAllocKernel final : public user_op::O
                       "embedding_size less equal than 1024 can use quantized communication. ";
     }
     cudaStream_t cuda_stream = ctx->stream()->As<ep::CudaStream>()->cuda_stream();
-<<<<<<< HEAD
-
-    embedding::NumUniques* num_uniques = Global<embedding::EmbeddingManager>::Get()->GetNumUniques(
-        ctx->Attr<std::string>("embedding_name"), ctx->parallel_ctx().parallel_id());
-=======
     embedding::NumUniques* num_uniques = kernel_state->NumUniques();
->>>>>>> dev_malloc_async
     const std::vector<uint32_t>& num_unique_matrix_vec =
         num_uniques->GetNumUniqueMatrix(current_iter_);
     CHECK_EQ(sizeof(IDX), sizeof(uint32_t));
