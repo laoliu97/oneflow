@@ -477,9 +477,11 @@ void ScaleGrad(JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* job_builder
   }
 }
 
-bool IsSupportFusedUpdatePut(const bool enable_auto_mixed_precision, const bool is_sgd,
-                             const std::string& down_scale_by_lbn, const std::string& skip_if_lbn,
-                             const float l1, const float l2, const float weight_decay) {
+bool IsSupportFusedUpdatePut(const bool is_full_cache, const bool enable_auto_mixed_precision,
+                             const bool is_sgd, const std::string& down_scale_by_lbn,
+                             const std::string& skip_if_lbn, const float l1, const float l2,
+                             const float weight_decay) {
+  if (!is_full_cache) { return false; }
   if (!enable_auto_mixed_precision) { return false; }
   if (!is_sgd) { return false; }
   if (!ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_GRADIENT_SHUFFLE_USE_FP16", true)) {
@@ -493,18 +495,16 @@ bool IsSupportFusedUpdatePut(const bool enable_auto_mixed_precision, const bool 
   return true;
 }
 
-void BuildEmbeddingUpdate(JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* job_builder,
-                          const ParallelConf& embedding_parallel_conf,
-                          const int64_t embedding_scope_symbol_id, const int64_t embedding_size,
-                          const int64_t line_size, const float l1, const float l2,
-                          const std::string& embedding_name, const OptimizerConf& optimizer_conf,
-                          const user_op::UserOpConfWrapper& embedding_op,
-                          const std::string& num_unique_ids_lbn, const std::string& unique_ids_lbn,
-                          const std::string& unique_values_lbn,
-                          const std::string& embedding_grad_lbn,
-                          const std::string& learning_rate_lbn, std::string* new_embedding_grad_lbn,
-                          std::string* state_initializer,
-                          OperatorConf* embedding_update_new_op_conf) {
+void BuildEmbeddingUpdate(
+    JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* job_builder,
+    const ParallelConf& embedding_parallel_conf, const int64_t embedding_scope_symbol_id,
+    const bool is_full_cache, const int64_t embedding_size, const int64_t line_size, const float l1,
+    const float l2, const std::string& embedding_name, const OptimizerConf& optimizer_conf,
+    const user_op::UserOpConfWrapper& embedding_op, const std::string& num_unique_ids_lbn,
+    const std::string& unique_ids_lbn, const std::string& unique_values_lbn,
+    const std::string& embedding_grad_lbn, const std::string& learning_rate_lbn,
+    std::string* new_embedding_grad_lbn, std::string* state_initializer,
+    OperatorConf* embedding_update_new_op_conf) {
   const TrainConf& train_conf = job_builder->job().job_conf().train_conf();
   const bool has_clip_grad = optimizer_conf.has_clip_conf();
   *new_embedding_grad_lbn = embedding_grad_lbn;
@@ -515,7 +515,7 @@ void BuildEmbeddingUpdate(JobPassCtx* ctx, const OpGraph& op_graph, JobBuilder* 
             has_clip_grad, embedding_grad_lbn, new_embedding_grad_lbn, &update_skip_if_lbn,
             &fuse_to_update_down_scale_by_lbn, &fuse_to_update_scale);
 
-  if (IsSupportFusedUpdatePut(ctx->job_desc().enable_auto_mixed_precision(),
+  if (IsSupportFusedUpdatePut(is_full_cache, ctx->job_desc().enable_auto_mixed_precision(),
                               optimizer_conf.has_naive_conf(), fuse_to_update_down_scale_by_lbn,
                               update_skip_if_lbn, l1, l2,
                               optimizer_conf.weight_decay_conf().weight_decay_rate())) {
@@ -1105,9 +1105,9 @@ Maybe<void> ReplaceEmbeddingOps::Apply(const OpGraph& op_graph, JobBuilder* job_
         std::string new_embedding_grad_lbn;
         OperatorConf embedding_update_op_conf;
         BuildEmbeddingUpdate(ctx, op_graph, job_builder, embedding_parallel_conf,
-                             embedding_scope_symbol_id, embedding_size, options.LineSize(), l1, l2,
-                             options.Name(), embedding_optimizer_conf, embedding_op,
-                             num_unique_ids_lbn, unique_ids_lbn, unique_values_lbn,
+                             embedding_scope_symbol_id, options.IsFullCache(), embedding_size,
+                             options.LineSize(), l1, l2, options.Name(), embedding_optimizer_conf,
+                             embedding_op, num_unique_ids_lbn, unique_ids_lbn, unique_values_lbn,
                              embedding_grad_lbn, learning_rate_lbn, &new_embedding_grad_lbn,
                              &state_initializer, &embedding_update_op_conf);
         shadow_op_name2grad_lbn[shadow_op_name] = new_embedding_grad_lbn;
