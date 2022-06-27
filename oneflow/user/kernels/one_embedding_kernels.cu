@@ -482,8 +482,7 @@ void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embeddi
                           const int64_t num_ids, const int64_t embedding_size,
                           const int64_t line_size, const bool is_prefetch, int64_t current_iter,
                           const void* num_unique_ptr, const void* unique_ids, const void* table_ids,
-                          T* values_ptr, V* embeddings_ptr, void* tmp_buffer_ptr,
-                          embedding::ValuesPtr* ptrs) {
+                          void* values_ptr, void* embeddings_ptr, void* tmp_buffer_ptr) {
   const auto& generator = embedding_state->generator();
   CHECK_NOTNULL(generator);
   std::shared_ptr<one::CUDAGeneratorImpl> cuda_generator =
@@ -505,26 +504,21 @@ void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embeddi
   uint32_t* missing_indices =
       buffer_manager.template Ptr<uint32_t>(EmbeddingBufferType::kMissingIndices);
   T* store_values;
-  if (use_dynamic_memory_allocation) {
-    size_t values_size = GetCudaAlignedSize(num_unique * line_size * sizeof(T));
-    CHECK(values_ptr == nullptr);
-    if (is_prefetch) {
-      CHECK(ptrs == nullptr);
+  if (is_prefetch) {
+    if (use_dynamic_memory_allocation) {
 #if CUDA_VERSION >= 11020
+      size_t values_size = GetCudaAlignedSize(num_unique * line_size * sizeof(T));
       OF_CUDA_CHECK(cudaMallocAsync(&store_values, values_size, cuda_stream));
 #else
       UNIMPLEMENTED();
 #endif
     } else {
-      CHECK(ptrs != nullptr);
-      void* lookup_values_ptr = ptrs->MallocLookupValuesPtr(current_iter, values_size, cuda_stream);
-      store_values = reinterpret_cast<T*>(lookup_values_ptr);
+      store_values = buffer_manager.template Ptr<T>(EmbeddingBufferType::kValues);
     }
   } else {
-    CHECK(ptrs == nullptr);
-    store_values = need_value_buffer ? buffer_manager.template Ptr<T>(EmbeddingBufferType::kValues)
-                                     : values_ptr;
+    store_values = reinterpret_cast<T*>(values_ptr);
   }
+
   if (is_prefetch || ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_USE_MISSING", false)) {
     void* host_num_keys = embedding_state->HostNumKeys();
     store->Get(stream, num_unique, unique_ids, store_values, num_missing_ptr, missing_indices);
@@ -551,7 +545,7 @@ void LookupAndInitMissing(ep::Stream* stream, EmbeddingKernelState<IDX>* embeddi
     InitMissingAndSliceCast<T, U, V>(cuda_stream, num_unique, embedding_size, line_size, seed,
                                      cuda_gen_state, initializer_param, initializer_index,
                                      reinterpret_cast<const U*>(table_ids), lookup_mask,
-                                     store_values, embeddings_ptr);
+                                     store_values, reinterpret_cast<V*>(embeddings_ptr));
   }
   if (is_prefetch) { store->Put(stream, num_unique, unique_ids, store_values); }
   if (is_prefetch && use_dynamic_memory_allocation) {
@@ -644,7 +638,7 @@ class EmbeddingPrefetchKernel final : public user_op::OpKernel {
         ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
         ctx->parallel_ctx().parallel_id(), unique_ids->shape_view().elem_cnt(), embedding_size,
         line_size, true, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
-        table_ids->dptr(), values_ptr, nullptr, tmp_buffer->mut_dptr(), nullptr);
+        table_ids->dptr(), values_ptr, nullptr, tmp_buffer->mut_dptr());
     current_iter_++;
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
@@ -711,37 +705,42 @@ class EmbeddingLookupKernel final : public user_op::OpKernel {
     user_op::Tensor* tmp_buffer = ctx->Tensor4ArgNameAndIndex("tmp_buffer", 0);
     const int64_t embedding_size = ctx->Attr<int64_t>("embedding_size");
     const int64_t line_size = ctx->Attr<int64_t>("line_size");
+    DataType data_type = unique_values->data_type();
     embedding::NumUniques* num_uniques = embedding_state->NumUniques();
     uint32_t num_unique = num_uniques->GetNumUnique(current_iter_);
-    void* lookup_embeddings_ptr;
-    if (ctx->has_output("embeddings", 0)) {
-      user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
-      const size_t lookup_embeddings_size = GetCudaAlignedSize(
-          num_unique * embedding_size * GetSizeOfDataType(embeddings->data_type()));
-      if (embedding::UseDynamicMemoryAllocation()) {
-        embedding::ValuesPtr* ptrs = embedding_state->ValuesPtr();
+    void* lookup_embeddings_ptr = nullptr;
+    void* lookup_values_ptr;
+    bool has_output_embeddings = ctx->has_output("embeddings", 0);
+    cudaStream_t cuda_stream = ctx->stream()->As<ep::CudaStream>()->cuda_stream();
+    if (embedding::UseDynamicMemoryAllocation()) {
+      size_t values_size = GetCudaAlignedSize(num_unique * line_size * sizeof(T));
+      embedding::ValuesPtr* ptrs = embedding_state->ValuesPtr();
+      lookup_values_ptr = ptrs->MallocLookupValuesPtr(current_iter_, values_size, cuda_stream);
+      if (has_output_embeddings) {
+        user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
+        const size_t lookup_embeddings_size = GetCudaAlignedSize(
+            num_unique * embedding_size * GetSizeOfDataType(embeddings->data_type()));
         lookup_embeddings_ptr =
-            ptrs->MallocLookupEmbeddingsPtr(current_iter_, lookup_embeddings_size,
-                                            ctx->stream()->As<ep::CudaStream>()->cuda_stream());
-      } else {
-        lookup_embeddings_ptr = embeddings->mut_dptr();
+            ptrs->MallocLookupEmbeddingsPtr(current_iter_, lookup_embeddings_size, cuda_stream);
       }
     } else {
-      lookup_embeddings_ptr = nullptr;
+      lookup_values_ptr = unique_values->mut_dptr();
+      if (has_output_embeddings) {
+        user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
+        lookup_embeddings_ptr = embeddings->mut_dptr();
+      }
     }
-    embedding::ValuesPtr* ptrs = nullptr;
-    if (embedding::UseDynamicMemoryAllocation()) {
-      ptrs = embedding_state->ValuesPtr();
-    }
-    T* values_ptr = nullptr;
-    if (!embedding::UseDynamicMemoryAllocation()) { values_ptr = unique_values->mut_dptr<T>(); }
     LookupAndInitMissing<T, U, half, IDX>(
         ctx->stream(), embedding_state, ctx->Attr<std::string>("embedding_name"),
         ctx->parallel_ctx().parallel_id(), unique_ids->shape_view().elem_cnt(), embedding_size,
         line_size, false, current_iter_, num_unique_ids->dptr(), unique_ids->dptr(),
-        table_ids->dptr(), values_ptr, reinterpret_cast<half*>(lookup_embeddings_ptr),
-        tmp_buffer->mut_dptr(), ptrs);
-
+        table_ids->dptr(), lookup_values_ptr, lookup_embeddings_ptr, tmp_buffer->mut_dptr());
+    if (has_output_embeddings && ParseBooleanFromEnv("ONEFLOW_ONE_EMBEDDING_USE_MISSING", false)) {
+      user_op::Tensor* embeddings = ctx->Tensor4ArgNameAndIndex("embeddings", 0);
+      CopyValuesToEmbeddings<T>(ctx->stream(), num_unique, embedding_size, line_size,
+                                unique_values->data_type(), embeddings->data_type(),
+                                reinterpret_cast<T*>(lookup_values_ptr), lookup_embeddings_ptr);
+    }
     current_iter_++;
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
