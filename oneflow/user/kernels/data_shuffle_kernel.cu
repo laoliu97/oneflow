@@ -778,31 +778,28 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
                                   parallel_num * num_ids * sizeof(K), cuda_stream));
     OF_CUDA_CHECK(cudaMallocAsync(&contiguous_cur_rank_unique_table_id,
                                   parallel_num * num_ids * sizeof(U), cuda_stream));
-    if (parallel_num > 1) {
-      // use num_partitioned_unique as indices_offset buffer, so should after ncclAllGather.
-      ComputeColSum<<<1, parallel_num, 0, cuda_stream>>>(parallel_id, parallel_num,
-                                                         num_unique_matrix_trans_ptr, offset_ptr);
-      ComputeOffset2<<<1, 1, 0, cuda_stream>>>(parallel_num, cur_rank_num_unique_ids_ptr,
-                                               cur_rank_offset_ptr);
 
-      int indices_cnt = parallel_num * num_ids;
-      ContiguousCurRankUniqueInverseIndices<<<BlocksNum4ThreadsNum(indices_cnt),
-                                              kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
-          indices_cnt, parallel_id, num_ids, offset_ptr, global_inverse_unique_indices);
+    ComputeColSum<<<1, parallel_num, 0, cuda_stream>>>(parallel_id, parallel_num,
+                                                       num_unique_matrix_trans_ptr, offset_ptr);
+    ComputeOffset2<<<1, 1, 0, cuda_stream>>>(parallel_num, cur_rank_num_unique_ids_ptr,
+                                             cur_rank_offset_ptr);
 
-      OF_NCCL_CHECK(
-          ncclReduceScatter(global_inverse_unique_indices,
-                            reinterpret_cast<IDX*>(inverse_unique_partition_indices->mut_dptr()),
-                            num_ids, GetNcclDataType(inverse_unique_partition_indices->data_type()),
-                            ncclRedOp_t::ncclSum, comm, cuda_stream));
-
-      ContiguousUniqueIdsAndTableIds<<<BlocksNum4ThreadsNum(indices_cnt), kCudaThreadsNumPerBlock,
-                                       0, cuda_stream>>>(
-          indices_cnt, num_ids, cur_rank_num_unique_ids_ptr, cur_rank_offset_ptr,
-          cur_rank_unique_ids_ptr, cur_rank_unique_table_ids_ptr, contiguous_cur_rank_unique_id,
-          contiguous_cur_rank_unique_table_id);
-    }
     int indices_cnt = parallel_num * num_ids;
+    ContiguousCurRankUniqueInverseIndices<<<BlocksNum4ThreadsNum(indices_cnt),
+                                            kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
+        indices_cnt, parallel_id, num_ids, offset_ptr, global_inverse_unique_indices);
+
+    OF_NCCL_CHECK(
+        ncclReduceScatter(global_inverse_unique_indices,
+                          reinterpret_cast<IDX*>(inverse_unique_partition_indices->mut_dptr()),
+                          num_ids, GetNcclDataType(inverse_unique_partition_indices->data_type()),
+                          ncclRedOp_t::ncclSum, comm, cuda_stream));
+
+    ContiguousUniqueIdsAndTableIds<<<BlocksNum4ThreadsNum(indices_cnt), kCudaThreadsNumPerBlock, 0,
+                                     cuda_stream>>>(
+        indices_cnt, num_ids, cur_rank_num_unique_ids_ptr, cur_rank_offset_ptr,
+        cur_rank_unique_ids_ptr, cur_rank_unique_table_ids_ptr, contiguous_cur_rank_unique_id,
+        contiguous_cur_rank_unique_table_id);
 
     OF_CUDA_CHECK(cudaMemsetAsync(cur_rank_num_unique->mut_dptr(), 0, sizeof(IDX), cuda_stream));
     OF_CUDA_CHECK(cudaMemsetAsync(workspace_ptr, 0, workspace_size, cuda_stream));
