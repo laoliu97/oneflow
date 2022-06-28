@@ -977,6 +977,8 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
         contiguous_cur_rank_unique_table_id);
     IDX* tmp_cur_rank_num_unique_ptr =
         buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kTmpCurRankNumUnique);
+    K* tmp_cur_rank_unique_ids_ptr =
+        buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kTmpCurRankUniqueIds);
     OF_CUDA_CHECK(cudaMemsetAsync(tmp_cur_rank_num_unique_ptr, 0, sizeof(IDX), cuda_stream));
     OF_CUDA_CHECK(cudaMemsetAsync(workspace_ptr, 0, workspace_size, cuda_stream));
     HashTableUniquePairs<K, U, IDX, embedding::LocalUniqueHash>
@@ -984,7 +986,7 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
             hash_table_capacity, indices_cnt, 0, 1, cur_rank_offset_ptr + parallel_num,
             tmp_cur_rank_num_unique_ptr, reinterpret_cast<TableEntry<K>*>(workspace_ptr),
             contiguous_cur_rank_unique_id, contiguous_cur_rank_unique_table_id,
-            reinterpret_cast<K*>(cur_rank_unique_ids->mut_dptr()),
+            tmp_cur_rank_unique_ids_ptr,
             reinterpret_cast<U*>(cur_rank_unique_table_ids->mut_dptr()),
             reinterpret_cast<IDX*>(cur_rank_inverse_indices->mut_dptr()), need_process_table_ids,
             0);
@@ -995,6 +997,9 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
         inverse_unique_partition_indices->mut_dptr(), tmp_inverse_unique_partition_indices_ptr,
         inverse_unique_partition_indices->shape_view().elem_cnt() * sizeof(IDX), cudaMemcpyDefault,
         cuda_stream));
+    OF_CUDA_CHECK(cudaMemcpyAsync(cur_rank_unique_ids->mut_dptr(), tmp_cur_rank_unique_ids_ptr,
+                                  cur_rank_unique_ids->shape_view().elem_cnt() * sizeof(K),
+                                  cudaMemcpyDefault, cuda_stream));
 
     IDX* host_num_unique_matrix = kernel_state->HostNumUniqueMatrix();
     OF_CUDA_CHECK(cudaMemcpyAsync(host_num_unique_matrix, num_unique_matrix_trans_ptr,
