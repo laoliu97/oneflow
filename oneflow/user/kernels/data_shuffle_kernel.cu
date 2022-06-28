@@ -445,6 +445,11 @@ enum class IdShuffleCudaGraphBufferType {
   kContiguousCurRankUniqueIds,
   kContiguousCurRankUniqueTableIds,
   kWorkspace,
+  kTmpInverseUniquePartitionIndices,
+  kTmpCurRankNumUnique,
+  kTmpCurRankUniqueIds,
+  kTmpCurRankUniqueTableIds,
+  kTmpCurRankInverseIndices,
   kMaxType
 };
 
@@ -480,6 +485,15 @@ class IdShuffleCudaGraphTmpBufferManager final {
     const size_t hash_table_capacity = parallel_num * num_ids;
     AllocBuffer(IdShuffleCudaGraphBufferType::kWorkspace,
                 hash_table_capacity * sizeof(TableEntry<K>));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kTmpCurRankNumUnique, 1 * sizeof(IDX));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kTmpCurRankUniqueIds,
+                parallel_num * num_ids * sizeof(K));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kTmpCurRankUniqueTableIds,
+                parallel_num * table_ids_bytes);
+    AllocBuffer(IdShuffleCudaGraphBufferType::kTmpInverseUniquePartitionIndices,
+                num_ids * sizeof(IDX));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kTmpCurRankInverseIndices,
+                parallel_num * num_ids * sizeof(IDX));
   }
 
   template<typename T = void>
@@ -948,12 +962,13 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
     ContiguousCurRankUniqueInverseIndices<<<BlocksNum4ThreadsNum(indices_cnt),
                                             kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
         indices_cnt, parallel_id, num_ids, offset_ptr, global_inverse_unique_indices);
+    IDX* tmp_inverse_unique_partition_indices_ptr = buffer_manager.template Ptr<IDX>(
+        IdShuffleCudaGraphBufferType::kTmpInverseUniquePartitionIndices);
 
-    OF_NCCL_CHECK(
-        ncclReduceScatter(global_inverse_unique_indices,
-                          reinterpret_cast<IDX*>(inverse_unique_partition_indices->mut_dptr()),
-                          num_ids, GetNcclDataType(inverse_unique_partition_indices->data_type()),
-                          ncclRedOp_t::ncclSum, comm, cuda_stream));
+    OF_NCCL_CHECK(ncclReduceScatter(global_inverse_unique_indices,
+                                    tmp_inverse_unique_partition_indices_ptr, num_ids,
+                                    GetNcclDataType(inverse_unique_partition_indices->data_type()),
+                                    ncclRedOp_t::ncclSum, comm, cuda_stream));
 
     ContiguousUniqueIdsAndTableIds<<<BlocksNum4ThreadsNum(indices_cnt), kCudaThreadsNumPerBlock, 0,
                                      cuda_stream>>>(
@@ -973,6 +988,10 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
             reinterpret_cast<U*>(cur_rank_unique_table_ids->mut_dptr()),
             reinterpret_cast<IDX*>(cur_rank_inverse_indices->mut_dptr()), need_process_table_ids,
             0);
+    OF_CUDA_CHECK(cudaMemcpyAsync(
+        inverse_unique_partition_indices->mut_dptr(), tmp_inverse_unique_partition_indices_ptr,
+        inverse_unique_partition_indices->shape_view().elem_cnt() * sizeof(IDX), cudaMemcpyDefault,
+        cuda_stream));
 
     IDX* host_num_unique_matrix = kernel_state->HostNumUniqueMatrix();
     OF_CUDA_CHECK(cudaMemcpyAsync(host_num_unique_matrix, num_unique_matrix_trans_ptr,
