@@ -431,7 +431,6 @@ class DataShuffleKernelState final : public user_op::OpKernelState {
   embedding::NumUniques* num_uniques_;
 };
 
-
 enum class IdShuffleCudaGraphBufferType {
   kTmpIds = 0,
   kTmpTableIds,
@@ -532,9 +531,9 @@ class DataShuffleCudaGraphKernelState final : public user_op::OpKernelState {
     const bool has_table_ids = ctx->has_input("table_ids", 0);
     const bool need_gen_table_ids = (!has_table_ids && num_tables > 1);
     const bool need_process_table_ids = (has_table_ids || num_tables > 1);
-    IdShuffleCudaGraphTmpBufferManager<K, U, IDX> buffer_manager(nullptr, num_ids,
-                                                        parallel_desc_.parallel_num(), need_gen_table_ids,
-                                                        need_process_table_ids);
+    IdShuffleCudaGraphTmpBufferManager<K, U, IDX> buffer_manager(
+        nullptr, num_ids, parallel_desc_.parallel_num(), need_gen_table_ids,
+        need_process_table_ids);
 
     OF_CUDA_CHECK(cudaMalloc(&tmp_buffer_ptr_, buffer_manager.TotalBufferSize()));
   }
@@ -836,7 +835,6 @@ class IdShuffleKernel final : public user_op::OpKernel {
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_ID_SHUFFLE_KERNEL, ID_DATA_TYPE_SEQ,
                                  TABLE_ID_DATA_TYPE_SEQ, IDX_DATA_TYPE_SEQ)
 
-
 template<typename K, typename U, typename IDX>
 class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
  public:
@@ -876,17 +874,19 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
 
     ncclComm_t comm = kernel_state->comm();
     IdShuffleCudaGraphTmpBufferManager<K, U, IDX> buffer_manager(kernel_state->TmpBuffer(), num_ids,
-                                                        parallel_num, need_gen_table_ids,
-                                                        need_process_table_ids);
+                                                                 parallel_num, need_gen_table_ids,
+                                                                 need_process_table_ids);
 
     K* ids_ptr = buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kTmpIds);
-    cudaMemcpyAsync(ids_ptr, ids->dptr(), ids->shape_view().elem_cnt() * sizeof(K), cudaMemcpyDefault, cuda_stream);
+    cudaMemcpyAsync(ids_ptr, ids->dptr(), ids->shape_view().elem_cnt() * sizeof(K),
+                    cudaMemcpyDefault, cuda_stream);
 
-    U* table_ids_ptr =
-        buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kTmpTableIds);
+    U* table_ids_ptr = buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kTmpTableIds);
     if (has_table_ids) {
       const user_op::Tensor* table_ids = ctx->Tensor4ArgNameAndIndex("table_ids", 0);
-      cudaMemcpyAsync(table_ids_ptr, table_ids->dptr(), table_ids->shape_view().elem_cnt() * sizeof(U), cudaMemcpyDefault, cuda_stream);
+      cudaMemcpyAsync(table_ids_ptr, table_ids->dptr(),
+                      table_ids->shape_view().elem_cnt() * sizeof(U), cudaMemcpyDefault,
+                      cuda_stream);
     } else if (need_gen_table_ids) {
       GenerateTableIds<<<BlocksNum4ThreadsNum(num_ids), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
           num_ids, num_tables, table_ids_ptr);
