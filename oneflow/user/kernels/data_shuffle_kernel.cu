@@ -431,6 +431,163 @@ class DataShuffleKernelState final : public user_op::OpKernelState {
   embedding::NumUniques* num_uniques_;
 };
 
+
+enum class IdShuffleCudaGraphBufferType {
+  kTmpIds = 0,
+  kTmpTableIds,
+  kGlobalIds,
+  kGlobalTableIds,
+  kCurRankNumUnique,
+  kCurRankUniqueIds,
+  kCurRankUniqueTableIds,
+  kNumUniqueMatrixTrans,
+  kOffset,
+  kCurRankOffset,
+  kContiguousCurRankUniqueIds,
+  kContiguousCurRankUniqueTableIds,
+  kWorkspace,
+  kMaxType
+};
+
+template<typename K, typename U, typename IDX>
+class IdShuffleCudaGraphTmpBufferManager final {
+ public:
+  OF_DISALLOW_COPY_AND_MOVE(IdShuffleCudaGraphTmpBufferManager);
+  IdShuffleCudaGraphTmpBufferManager(void* ptr, const int64_t num_ids, const int64_t parallel_num,
+                                     bool need_table_ids, bool need_process_table_ids)
+      : offset_(0),
+        offsets_(static_cast<size_t>(IdShuffleCudaGraphBufferType::kMaxType), -1),
+        sizes_(static_cast<size_t>(IdShuffleCudaGraphBufferType::kMaxType)),
+        ptr_(ptr) {
+    const int64_t num_table_ids = need_process_table_ids ? num_ids : 0;
+    const size_t table_ids_bytes = need_table_ids ? num_ids * sizeof(U) : 0;
+    AllocBuffer(IdShuffleCudaGraphBufferType::kTmpIds, num_ids * sizeof(K));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kTmpTableIds, table_ids_bytes);
+    AllocBuffer(IdShuffleCudaGraphBufferType::kGlobalIds, num_ids * parallel_num * sizeof(K));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kGlobalTableIds, parallel_num * table_ids_bytes);
+    AllocBuffer(IdShuffleCudaGraphBufferType::kCurRankNumUnique, parallel_num * sizeof(IDX));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kCurRankUniqueIds,
+                parallel_num * num_ids * sizeof(K));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kCurRankUniqueTableIds,
+                parallel_num * table_ids_bytes);
+    AllocBuffer(IdShuffleCudaGraphBufferType::kNumUniqueMatrixTrans,
+                parallel_num * parallel_num * sizeof(IDX));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kOffset, parallel_num * sizeof(IDX));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kCurRankOffset, (parallel_num + 1) * sizeof(IDX));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueIds,
+                parallel_num * num_ids * sizeof(K));
+    AllocBuffer(IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueTableIds,
+                parallel_num * table_ids_bytes);
+    const size_t hash_table_capacity = parallel_num * num_ids;
+    AllocBuffer(IdShuffleCudaGraphBufferType::kWorkspace,
+                hash_table_capacity * sizeof(TableEntry<K>));
+  }
+
+  template<typename T = void>
+  T* Ptr(IdShuffleCudaGraphBufferType type) {
+    CHECK(ptr_ != nullptr);
+    int64_t offset = offsets_.at(static_cast<size_t>(type));
+    CHECK_NE(offset, -1);
+    return reinterpret_cast<T*>(reinterpret_cast<char*>(ptr_) + offset);
+  }
+
+  int64_t Size(IdShuffleCudaGraphBufferType type) { return sizes_.at(static_cast<size_t>(type)); }
+
+  size_t TotalBufferSize() const { return offset_; }
+
+ private:
+  void AllocBuffer(IdShuffleCudaGraphBufferType type, size_t size) {
+    const size_t type_id = static_cast<size_t>(type);
+    CHECK_EQ(offsets_.at(type_id), -1);
+    offsets_.at(type_id) = offset_;
+    sizes_.at(type_id) = size;
+    offset_ += GetCudaAlignedSize(size);
+  }
+  size_t offset_;
+  std::vector<int64_t> offsets_;
+  std::vector<int64_t> sizes_;
+  void* ptr_;
+};
+
+template<typename K, typename U, typename IDX>
+class DataShuffleCudaGraphKernelState final : public user_op::OpKernelState {
+ public:
+  explicit DataShuffleCudaGraphKernelState(user_op::KernelInitContext* ctx)
+      : device_index_(-1),
+        stream_name_(EagerNcclCommMgr::kDefaultStreamName),
+        parallel_desc_(ctx->parallel_desc()) {
+    OF_CUDA_CHECK(cudaGetDevice(&device_index_));
+    if (ctx->op_conf().has_stream_name_hint()) { stream_name_ = ctx->op_conf().stream_name_hint(); }
+    OF_CUDA_CHECK(cudaMallocHost(
+        &host_num_unique_matrix_,
+        parallel_desc_.parallel_num() * parallel_desc_.parallel_num() * sizeof(IDX)));
+    const std::string& embedding_name = ctx->Attr<std::string>("embedding_name");
+    const int64_t parallel_id = ctx->parallel_ctx().parallel_id();
+    num_uniques_ =
+        Global<embedding::EmbeddingManager>::Get()->GetNumUniques(embedding_name, parallel_id);
+    const user_op::TensorDesc* ids_desc = ctx->TensorDesc4ArgNameAndIndex("ids", 0);
+    int64_t num_ids = ids_desc->shape().elem_cnt();
+
+    const int32_t num_tables = ctx->Attr<int32_t>("num_tables");
+    const bool has_table_ids = ctx->has_input("table_ids", 0);
+    const bool need_gen_table_ids = (!has_table_ids && num_tables > 1);
+    const bool need_process_table_ids = (has_table_ids || num_tables > 1);
+    IdShuffleCudaGraphTmpBufferManager<K, U, IDX> buffer_manager(nullptr, num_ids,
+                                                        parallel_desc_.parallel_num(), need_gen_table_ids,
+                                                        need_process_table_ids);
+
+    OF_CUDA_CHECK(cudaMalloc(&tmp_buffer_ptr_, buffer_manager.TotalBufferSize()));
+  }
+  ~DataShuffleCudaGraphKernelState() {
+    CudaCurrentDeviceGuard guard(device_index_);
+    OF_CUDA_CHECK(cudaFreeHost(host_num_unique_matrix_));
+    OF_CUDA_CHECK(cudaFree(tmp_buffer_ptr_));
+  }
+
+  ncclComm_t comm() { return GetOrCreate().comm; }
+
+  IDX* HostNumUniqueMatrix() { return host_num_unique_matrix_; }
+
+  embedding::NumUniques* NumUniques() { return num_uniques_; }
+
+  void* TmpBuffer() { return tmp_buffer_ptr_; }
+  size_t TmpBufferSize() { return tmp_buffer_size_; }
+
+ private:
+  struct Comm {
+    Comm(ncclComm_t comm) : comm(comm) {}
+    ncclComm_t comm;
+  };
+
+  const Comm& GetOrCreate() {
+    if (!comm_) { Init(); }
+    return *comm_;
+  }
+
+  void Init() {
+    std::set<std::pair<int64_t, int64_t>> device_set;
+    for (int64_t parallel_id = 0; parallel_id < parallel_desc_.parallel_num(); ++parallel_id) {
+      int64_t machine_id = CHECK_JUST(parallel_desc_.MachineId4ParallelId(parallel_id));
+      int64_t device_id = CHECK_JUST(parallel_desc_.DeviceId4ParallelId(parallel_id));
+      device_set.emplace(std::make_pair(machine_id, device_id));
+    }
+    EagerNcclCommMgr* comm_mgr = CHECK_NOTNULL(Global<EagerNcclCommMgr>::Get());
+    ncclComm_t comm;
+    comm = comm_mgr->GetCommForDeviceAndStreamName(device_set, stream_name_);
+    comm_.reset(new Comm(comm));
+  }
+
+  int device_index_;
+  bool has_independent_stream_;
+  std::string stream_name_;
+  ParallelDesc parallel_desc_;
+  std::unique_ptr<Comm> comm_;
+  IDX* host_num_unique_matrix_;
+  embedding::NumUniques* num_uniques_;
+  void* tmp_buffer_ptr_;
+  size_t tmp_buffer_size_;
+};
+
 template<typename IDX>
 __global__ void ComputeOffset(int32_t n, IDX* value, IDX* offsets) {
   IDX sum = 0;
@@ -679,6 +836,7 @@ class IdShuffleKernel final : public user_op::OpKernel {
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_ID_SHUFFLE_KERNEL, ID_DATA_TYPE_SEQ,
                                  TABLE_ID_DATA_TYPE_SEQ, IDX_DATA_TYPE_SEQ)
 
+
 template<typename K, typename U, typename IDX>
 class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
  public:
@@ -687,14 +845,14 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
 
   std::shared_ptr<user_op::OpKernelState> CreateOpKernelState(
       user_op::KernelInitContext* ctx) const override {
-    return std::make_shared<DataShuffleKernelState<IDX>>(ctx);
+    return std::make_shared<DataShuffleCudaGraphKernelState<K, U, IDX>>(ctx);
   }
 
  private:
   using user_op::OpKernel::Compute;
   void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
                const user_op::OpKernelCache*) const override {
-    auto* kernel_state = dynamic_cast<DataShuffleKernelState<IDX>*>(state);
+    auto* kernel_state = dynamic_cast<DataShuffleCudaGraphKernelState<K, U, IDX>*>(state);
     CHECK(kernel_state != nullptr);
     const user_op::Tensor* ids = ctx->Tensor4ArgNameAndIndex("ids", 0);
     user_op::Tensor* num_unique_matrix = ctx->Tensor4ArgNameAndIndex("num_unique_matrix", 0);
@@ -715,42 +873,49 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
     const int64_t parallel_num = ctx->parallel_ctx().parallel_num();
     const int64_t parallel_id = ctx->parallel_ctx().parallel_id();
     cudaStream_t cuda_stream = ctx->stream()->As<ep::CudaStream>()->cuda_stream();
-    IdShuffleTmpBufferManager<K, U, IDX> buffer_manager(
-        tmp_buffer->mut_dptr(), num_ids, parallel_num, need_gen_table_ids, need_process_table_ids);
-    CHECK_GE(tmp_buffer->shape_view().elem_cnt(), buffer_manager.TotalBufferSize());
 
-    const U* table_ids_ptr;
+    ncclComm_t comm = kernel_state->comm();
+    IdShuffleCudaGraphTmpBufferManager<K, U, IDX> buffer_manager(kernel_state->TmpBuffer(), num_ids,
+                                                        parallel_num, need_gen_table_ids,
+                                                        need_process_table_ids);
+
+    K* ids_ptr = buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kTmpIds);
+    cudaMemcpyAsync(ids_ptr, ids->dptr(), ids->shape_view().elem_cnt() * sizeof(K), cudaMemcpyDefault, cuda_stream);
+
+    U* table_ids_ptr =
+        buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kTmpTableIds);
     if (has_table_ids) {
       const user_op::Tensor* table_ids = ctx->Tensor4ArgNameAndIndex("table_ids", 0);
-      table_ids_ptr = reinterpret_cast<const U*>(table_ids->dptr());
+      cudaMemcpyAsync(table_ids_ptr, table_ids->dptr(), table_ids->shape_view().elem_cnt() * sizeof(U), cudaMemcpyDefault, cuda_stream);
     } else if (need_gen_table_ids) {
       GenerateTableIds<<<BlocksNum4ThreadsNum(num_ids), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
-          num_ids, num_tables, buffer_manager.template Ptr<U>(IdShuffleBufferType::kTableIds));
-      table_ids_ptr = buffer_manager.template Ptr<U>(IdShuffleBufferType::kTableIds);
+          num_ids, num_tables, table_ids_ptr);
     } else {
       table_ids_ptr = nullptr;
     }
-    ncclComm_t comm = kernel_state->comm();
 
-    K* global_ids = buffer_manager.template Ptr<K>(IdShuffleBufferType::kPartitionedUniqueIds);
+    K* global_ids = buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kGlobalIds);
     U* global_table_ids =
-        buffer_manager.template Ptr<U>(IdShuffleBufferType::kPartitionedUniqueTableIds);
+        buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kGlobalTableIds);
     IDX* cur_rank_num_unique_ids_ptr =
-        buffer_manager.template Ptr<IDX>(IdShuffleBufferType::kNumPartitionedUnique);
-    IDX* num_unique_matrix_trans_ptr = reinterpret_cast<IDX*>(num_unique_matrix->mut_dptr());
+        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kCurRankNumUnique);
+    IDX* num_unique_matrix_trans_ptr =
+        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kNumUniqueMatrixTrans);
+
     // 1. AllGather ids table_ids
-    OF_NCCL_CHECK(ncclAllGather(ids->dptr(), global_ids, num_ids, GetNcclDataType(ids->data_type()),
+    OF_NCCL_CHECK(ncclAllGather(ids_ptr, global_ids, num_ids, GetNcclDataType(ids->data_type()),
                                 comm, cuda_stream));
     if (need_process_table_ids) {
       OF_NCCL_CHECK(ncclAllGather(table_ids_ptr, global_table_ids, num_ids,
                                   GetNcclDataType(ids->data_type()), comm, cuda_stream));
     }
     size_t hash_table_capacity = parallel_num * num_ids;
-    void* workspace_ptr = buffer_manager.Ptr(IdShuffleBufferType::kWorkspace);
-    size_t workspace_size = buffer_manager.Size(IdShuffleBufferType::kWorkspace);
-    K* cur_rank_unique_ids_ptr = buffer_manager.template Ptr<K>(IdShuffleBufferType::kReceivedIds);
+    void* workspace_ptr = buffer_manager.Ptr(IdShuffleCudaGraphBufferType::kWorkspace);
+    size_t workspace_size = buffer_manager.Size(IdShuffleCudaGraphBufferType::kWorkspace);
+    K* cur_rank_unique_ids_ptr =
+        buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kCurRankUniqueIds);
     U* cur_rank_unique_table_ids_ptr =
-        buffer_manager.template Ptr<U>(IdShuffleBufferType::kReceivedTableIds);
+        buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kCurRankUniqueTableIds);
     // reuse out as buffer
     IDX* global_inverse_unique_indices =
         reinterpret_cast<IDX*>(cur_rank_inverse_indices->mut_dptr());
@@ -766,18 +931,13 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
                                 parallel_num, GetNcclDataType(num_unique_matrix->data_type()), comm,
                                 cuda_stream));
     // 4. contiguous
-    IDX* offset_ptr;
-    IDX* cur_rank_offset_ptr;
-    K* contiguous_cur_rank_unique_id;
-    U* contiguous_cur_rank_unique_table_id;
-
-    OF_CUDA_CHECK(cudaMallocAsync(&offset_ptr, parallel_num * sizeof(IDX), cuda_stream));
-    OF_CUDA_CHECK(
-        cudaMallocAsync(&cur_rank_offset_ptr, (parallel_num + 1) * sizeof(IDX), cuda_stream));
-    OF_CUDA_CHECK(cudaMallocAsync(&contiguous_cur_rank_unique_id,
-                                  parallel_num * num_ids * sizeof(K), cuda_stream));
-    OF_CUDA_CHECK(cudaMallocAsync(&contiguous_cur_rank_unique_table_id,
-                                  parallel_num * num_ids * sizeof(U), cuda_stream));
+    IDX* offset_ptr = buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kOffset);
+    IDX* cur_rank_offset_ptr =
+        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kCurRankOffset);
+    K* contiguous_cur_rank_unique_id =
+        buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueIds);
+    U* contiguous_cur_rank_unique_table_id = buffer_manager.template Ptr<U>(
+        IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueTableIds);
 
     ComputeColSum<<<1, parallel_num, 0, cuda_stream>>>(parallel_id, parallel_num,
                                                        num_unique_matrix_trans_ptr, offset_ptr);
@@ -813,11 +973,6 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
             reinterpret_cast<U*>(cur_rank_unique_table_ids->mut_dptr()),
             reinterpret_cast<IDX*>(cur_rank_inverse_indices->mut_dptr()), need_process_table_ids,
             0);
-
-    OF_CUDA_CHECK(cudaFreeAsync(offset_ptr, cuda_stream));
-    OF_CUDA_CHECK(cudaFreeAsync(cur_rank_offset_ptr, cuda_stream));
-    OF_CUDA_CHECK(cudaFreeAsync(contiguous_cur_rank_unique_id, cuda_stream));
-    OF_CUDA_CHECK(cudaFreeAsync(contiguous_cur_rank_unique_table_id, cuda_stream));
 
     IDX* host_num_unique_matrix = kernel_state->HostNumUniqueMatrix();
     OF_CUDA_CHECK(cudaMemcpyAsync(host_num_unique_matrix, num_unique_matrix_trans_ptr,
