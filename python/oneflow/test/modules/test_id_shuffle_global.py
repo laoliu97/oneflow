@@ -350,8 +350,8 @@ def _test_embedding_gradient_shuffle(test_case, enable_quantize, fp16, embedding
 class DataShuffleTestCase(flow.unittest.TestCase):
     def test_id_shuffle(test_case):
         arg_dict = OrderedDict()
-        arg_dict["has_table_id"] = [True, False]
-        arg_dict["num_tables"] = [1, 26]
+        arg_dict["has_table_id"] = [False]
+        arg_dict["num_tables"] = [26]
         for kwargs in GenArgDict(arg_dict):
             _test_id_shuffle(test_case, **kwargs)
 
