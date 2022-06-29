@@ -113,13 +113,13 @@ __global__ void HashTableUniqueAndPartitionPairs(const uint32_t table_capacity,
 
 template<typename K, typename V, typename IDX, typename HASH>
 __global__ void HashTableUniquePairs(const uint32_t table_capacity, uint32_t num_keys,
-                                     int32_t parallel_id, int32_t parallel_num, IDX* num_keys_ptr,
+                                     uint32_t num_ids, int32_t parallel_id, int32_t parallel_num,
                                      IDX* unique_count, TableEntry<K>* table, const K* keys,
                                      const V* values, K* unique_keys, V* unique_values,
                                      IDX* reverse_index, bool need_process_values,
                                      IDX reverse_index_offset) {
-  if (num_keys_ptr != nullptr) { num_keys = *num_keys_ptr; }
   CUDA_1D_KERNEL_LOOP_T(uint32_t, i, num_keys) {
+    int partition_id = i / num_ids;
     IDX r_index_plus_one = 0;
     const K key = keys[i];
     size_t key_hash = HASH()(key);
@@ -134,14 +134,14 @@ __global__ void HashTableUniquePairs(const uint32_t table_capacity, uint32_t num
     uint32_t counter = 0;
     while (r_index_plus_one == 0) {
       bool prob_next = false;
-      K* key_ptr = &table[pos].key;
-      volatile uint32_t* table_value_ptr = &table[pos].value;
+      K* key_ptr = &table[partition_id * table_capacity + pos].key;
+      volatile uint32_t* table_value_ptr = &table[partition_id * table_capacity + pos].value;
       const K old_key = cuda::atomic::CAS(key_ptr, 0, key_hi);
       if (old_key == 0) {
-        IDX unique_pos = cuda::atomic::Add(unique_count, 1);
+        IDX unique_pos = cuda::atomic::Add(unique_count + partition_id, 1);
         r_index_plus_one = unique_pos + 1;
-        unique_keys[unique_pos] = key;
-        if (need_process_values) { unique_values[unique_pos] = values[i]; }
+        unique_keys[partition_id * num_ids + unique_pos] = key;
+        if (need_process_values) { unique_values[partition_id * num_ids + unique_pos] = values[i]; }
         *table_value_ptr = ((r_index_plus_one << 1U) | key_lo);
       } else if (old_key == key_hi) {
         const uint32_t value = *table_value_ptr;
@@ -255,26 +255,36 @@ void FilterCurRankAndUnique(cudaStream_t cuda_stream, int64_t num_ids, size_t ca
                             K* cur_rank_unique_ids, V* cur_rank_unique_table_ids,
                             IDX* global_inverse_unique_indices, void* global_workspace_ptr,
                             size_t workspace_bytes, bool need_process_table_ids) {
-  size_t table_capacity_bytes = capacity * sizeof(TableEntry<K>);
+  size_t table_capacity_bytes = parallel_num * capacity * sizeof(TableEntry<K>);
   CHECK_GE(workspace_bytes, table_capacity_bytes);
   OF_CUDA_CHECK(
       cudaMemsetAsync(cur_rank_num_unique_ids_ptr, 0, parallel_num * sizeof(IDX), cuda_stream));
-  for (int i = 0; i < parallel_num; ++i) {
-    IDX* num_unique_ids = cur_rank_num_unique_ids_ptr + i;
-    const K* ids = global_ids + i * num_ids;
-    const V* table_ids = global_table_ids + i * num_ids;
-    K* unique_ids = cur_rank_unique_ids + i * num_ids;
-    V* unique_table_ids = cur_rank_unique_table_ids + i * num_ids;
-    IDX* inverse_unique_indices = global_inverse_unique_indices + i * num_ids;
-    TableEntry<K>* workspace_ptr = reinterpret_cast<TableEntry<K>*>(global_workspace_ptr);
-    OF_CUDA_CHECK(cudaMemsetAsync(workspace_ptr, 0, table_capacity_bytes, cuda_stream));
-    IDX reverse_index_offset = parallel_id * num_ids;
-    HashTableUniquePairs<K, V, IDX, HASH>
-        <<<BlocksNum4ThreadsNum(num_ids), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
-            capacity, num_ids, parallel_id, parallel_num, nullptr, num_unique_ids, workspace_ptr,
-            ids, table_ids, unique_ids, unique_table_ids, inverse_unique_indices,
-            need_process_table_ids, reverse_index_offset);
-  }
+  int num_keys = parallel_num * num_ids;
+  IDX reverse_index_offset = parallel_id * num_ids;
+  TableEntry<K>* workspace_ptr = reinterpret_cast<TableEntry<K>*>(global_workspace_ptr);
+  OF_CUDA_CHECK(cudaMemsetAsync(workspace_ptr, 0, table_capacity_bytes, cuda_stream));
+  HashTableUniquePairs<K, V, IDX, HASH>
+      <<<BlocksNum4ThreadsNum(num_keys), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
+          capacity, num_keys, num_ids, parallel_id, parallel_num, cur_rank_num_unique_ids_ptr,
+          workspace_ptr, global_ids, global_table_ids, cur_rank_unique_ids,
+          cur_rank_unique_table_ids, global_inverse_unique_indices, need_process_table_ids,
+          reverse_index_offset);
+  // for (int i = 0; i < parallel_num; ++i) {
+  //  IDX* num_unique_ids = cur_rank_num_unique_ids_ptr + i;
+  //  const K* ids = global_ids + i * num_ids;
+  //  const V* table_ids = global_table_ids + i * num_ids;
+  //  K* unique_ids = cur_rank_unique_ids + i * num_ids;
+  //  V* unique_table_ids = cur_rank_unique_table_ids + i * num_ids;
+  //  IDX* inverse_unique_indices = global_inverse_unique_indices + i * num_ids;
+  //  TableEntry<K>* workspace_ptr = reinterpret_cast<TableEntry<K>*>(global_workspace_ptr);
+  //  OF_CUDA_CHECK(cudaMemsetAsync(workspace_ptr, 0, table_capacity_bytes, cuda_stream));
+  //  IDX reverse_index_offset = parallel_id * num_ids;
+  //  HashTableUniquePairs<K, V, IDX, HASH>
+  //      <<<BlocksNum4ThreadsNum(num_ids), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
+  //          capacity, num_ids, parallel_id, parallel_num, num_unique_ids, workspace_ptr,
+  //          ids, table_ids, unique_ids, unique_table_ids, inverse_unique_indices,
+  //          need_process_table_ids, reverse_index_offset);
+  //}
 }
 
 template<typename T>
@@ -543,7 +553,7 @@ class IdShuffleCudaGraphTmpBufferManager final {
                 parallel_num * num_ids * sizeof(K));
     AllocBuffer(IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueTableIds,
                 parallel_num * num_ids * sizeof(U));
-    const size_t hash_table_capacity = parallel_num * num_ids;
+    const size_t hash_table_capacity = parallel_num * parallel_num * num_ids;
     AllocBuffer(IdShuffleCudaGraphBufferType::kWorkspace,
                 hash_table_capacity * sizeof(TableEntry<K>));
     AllocBuffer(IdShuffleCudaGraphBufferType::kTmpCurRankNumUnique, 1 * sizeof(IDX));
