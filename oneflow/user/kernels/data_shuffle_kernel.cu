@@ -855,7 +855,9 @@ OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_CUDA_ID_SHUFFLE_KERNEL, ID_DATA_TYPE_S
 template<typename K, typename U, typename IDX>
 class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
  public:
-  IdShuffleCudaGraphKernel() : current_iter_(0){};
+  IdShuffleCudaGraphKernel() : current_iter_(0) {
+    cuda_graph_exec_.reset(new ep::CudaGraphExecutable());
+  };
   ~IdShuffleCudaGraphKernel() override = default;
 
   std::shared_ptr<user_op::OpKernelState> CreateOpKernelState(
@@ -910,93 +912,104 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
     } else {
       table_ids_ptr = nullptr;
     }
-
-    K* global_ids = buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kGlobalIds);
-    U* global_table_ids =
-        buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kGlobalTableIds);
-
-    IDX* num_unique_matrix_trans_ptr =
-        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kNumUniqueMatrixTrans);
-
-    // 1. AllGather ids table_ids
-    OF_NCCL_CHECK(ncclAllGather(ids_ptr, global_ids, num_ids, GetNcclDataType(ids->data_type()),
-                                comm, cuda_stream));
-    if (need_process_table_ids) {
-      OF_NCCL_CHECK(ncclAllGather(table_ids_ptr, global_table_ids, num_ids,
-                                  GetNcclDataType(ids->data_type()), comm, cuda_stream));
+    bool is_capturing = false;
+    auto* stream = dynamic_cast<ep::CudaStream*>(ctx->stream());
+    if (cuda_graph_exec_->IsInstantiated()) {
+      stream->LaunchGraph(cuda_graph_exec_.get());
+    } else {
+      is_capturing = true;
     }
-    size_t hash_table_capacity = parallel_num * num_ids;
-    void* workspace_ptr = buffer_manager.Ptr(IdShuffleCudaGraphBufferType::kWorkspace);
-    size_t workspace_size = buffer_manager.Size(IdShuffleCudaGraphBufferType::kWorkspace);
-    IDX* cur_rank_num_unique_ids_ptr =
-        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kCurRankNumUnique);
-    K* cur_rank_unique_ids_ptr =
-        buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kCurRankUniqueIds);
-    U* cur_rank_unique_table_ids_ptr =
-        buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kCurRankUniqueTableIds);
-    // reuse out as buffer
-    IDX* global_inverse_unique_indices =
-        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kGlobalInverseUniqueIndices);
-    // 2. for total ids, filter cur parallel_id and do unique
-    FilterCurRankAndUnique<K, U, IDX, embedding::ShardingHash>(
-        cuda_stream, num_ids, hash_table_capacity, parallel_id, parallel_num, global_ids,
-        global_table_ids, cur_rank_num_unique_ids_ptr, cur_rank_unique_ids_ptr,
-        cur_rank_unique_table_ids_ptr, global_inverse_unique_indices, workspace_ptr, workspace_size,
-        need_process_table_ids);
-
-    // 3. AllGather num_unique
-    OF_NCCL_CHECK(ncclAllGather(cur_rank_num_unique_ids_ptr, num_unique_matrix_trans_ptr,
-                                parallel_num, GetNcclDataType(num_unique_matrix->data_type()), comm,
-                                cuda_stream));
-    // 4. contiguous
-    IDX* offset_ptr = buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kOffset);
-    IDX* cur_rank_offset_ptr =
-        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kCurRankOffset);
-    K* contiguous_cur_rank_unique_id =
-        buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueIds);
-    U* contiguous_cur_rank_unique_table_id = buffer_manager.template Ptr<U>(
-        IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueTableIds);
-
-    ComputeColSum<<<1, parallel_num, 0, cuda_stream>>>(parallel_id, parallel_num,
-                                                       num_unique_matrix_trans_ptr, offset_ptr);
-    ComputeOffset2<<<1, 1, 0, cuda_stream>>>(parallel_num, cur_rank_num_unique_ids_ptr,
-                                             cur_rank_offset_ptr);
-
-    int indices_cnt = parallel_num * num_ids;
-    ContiguousCurRankUniqueInverseIndices<<<BlocksNum4ThreadsNum(indices_cnt),
-                                            kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
-        indices_cnt, parallel_id, num_ids, offset_ptr, global_inverse_unique_indices);
     IDX* tmp_inverse_unique_partition_indices_ptr = buffer_manager.template Ptr<IDX>(
         IdShuffleCudaGraphBufferType::kTmpInverseUniquePartitionIndices);
-
-    OF_NCCL_CHECK(ncclReduceScatter(global_inverse_unique_indices,
-                                    tmp_inverse_unique_partition_indices_ptr, num_ids,
-                                    GetNcclDataType(inverse_unique_partition_indices->data_type()),
-                                    ncclRedOp_t::ncclSum, comm, cuda_stream));
-
-    ContiguousUniqueIdsAndTableIds<<<BlocksNum4ThreadsNum(indices_cnt), kCudaThreadsNumPerBlock, 0,
-                                     cuda_stream>>>(
-        indices_cnt, num_ids, cur_rank_num_unique_ids_ptr, cur_rank_offset_ptr,
-        cur_rank_unique_ids_ptr, cur_rank_unique_table_ids_ptr, contiguous_cur_rank_unique_id,
-        contiguous_cur_rank_unique_table_id);
+    IDX* tmp_cur_rank_inverse_indices_ptr =
+        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kTmpCurRankInverseIndices);
     IDX* tmp_cur_rank_num_unique_ptr =
         buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kTmpCurRankNumUnique);
     K* tmp_cur_rank_unique_ids_ptr =
         buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kTmpCurRankUniqueIds);
     U* tmp_cur_rank_unique_table_ids_ptr =
         buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kTmpCurRankUniqueTableIds);
+    IDX* num_unique_matrix_trans_ptr =
+        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kNumUniqueMatrixTrans);
+    int indices_cnt = parallel_num * num_ids;
 
-    IDX* tmp_cur_rank_inverse_indices_ptr =
-        buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kTmpCurRankInverseIndices);
-    OF_CUDA_CHECK(cudaMemsetAsync(tmp_cur_rank_num_unique_ptr, 0, sizeof(IDX), cuda_stream));
-    OF_CUDA_CHECK(cudaMemsetAsync(workspace_ptr, 0, workspace_size, cuda_stream));
-    HashTableUniquePairs<K, U, IDX, embedding::LocalUniqueHash>
-        <<<BlocksNum4ThreadsNum(indices_cnt), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
-            hash_table_capacity, indices_cnt, 0, 1, cur_rank_offset_ptr + parallel_num,
-            tmp_cur_rank_num_unique_ptr, reinterpret_cast<TableEntry<K>*>(workspace_ptr),
-            contiguous_cur_rank_unique_id, contiguous_cur_rank_unique_table_id,
-            tmp_cur_rank_unique_ids_ptr, tmp_cur_rank_unique_table_ids_ptr,
-            tmp_cur_rank_inverse_indices_ptr, need_process_table_ids, 0);
+    if (is_capturing) {
+      stream->BeginGraphCapture();
+      K* global_ids = buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kGlobalIds);
+      U* global_table_ids =
+          buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kGlobalTableIds);
+      // 1. AllGather ids table_ids
+      OF_NCCL_CHECK(ncclAllGather(ids_ptr, global_ids, num_ids, GetNcclDataType(ids->data_type()),
+                                  comm, cuda_stream));
+      if (need_process_table_ids) {
+        OF_NCCL_CHECK(ncclAllGather(table_ids_ptr, global_table_ids, num_ids,
+                                    GetNcclDataType(ids->data_type()), comm, cuda_stream));
+      }
+      size_t hash_table_capacity = parallel_num * num_ids;
+      void* workspace_ptr = buffer_manager.Ptr(IdShuffleCudaGraphBufferType::kWorkspace);
+      size_t workspace_size = buffer_manager.Size(IdShuffleCudaGraphBufferType::kWorkspace);
+      IDX* cur_rank_num_unique_ids_ptr =
+          buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kCurRankNumUnique);
+      K* cur_rank_unique_ids_ptr =
+          buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kCurRankUniqueIds);
+      U* cur_rank_unique_table_ids_ptr =
+          buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kCurRankUniqueTableIds);
+      // reuse out as buffer
+      IDX* global_inverse_unique_indices = buffer_manager.template Ptr<IDX>(
+          IdShuffleCudaGraphBufferType::kGlobalInverseUniqueIndices);
+      // 2. for total ids, filter cur parallel_id and do unique
+      FilterCurRankAndUnique<K, U, IDX, embedding::ShardingHash>(
+          cuda_stream, num_ids, hash_table_capacity, parallel_id, parallel_num, global_ids,
+          global_table_ids, cur_rank_num_unique_ids_ptr, cur_rank_unique_ids_ptr,
+          cur_rank_unique_table_ids_ptr, global_inverse_unique_indices, workspace_ptr,
+          workspace_size, need_process_table_ids);
+
+      // 3. AllGather num_unique
+      OF_NCCL_CHECK(ncclAllGather(cur_rank_num_unique_ids_ptr, num_unique_matrix_trans_ptr,
+                                  parallel_num, GetNcclDataType(num_unique_matrix->data_type()),
+                                  comm, cuda_stream));
+      // 4. contiguous
+      IDX* offset_ptr = buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kOffset);
+      IDX* cur_rank_offset_ptr =
+          buffer_manager.template Ptr<IDX>(IdShuffleCudaGraphBufferType::kCurRankOffset);
+      K* contiguous_cur_rank_unique_id =
+          buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueIds);
+      U* contiguous_cur_rank_unique_table_id = buffer_manager.template Ptr<U>(
+          IdShuffleCudaGraphBufferType::kContiguousCurRankUniqueTableIds);
+
+      ComputeColSum<<<1, parallel_num, 0, cuda_stream>>>(parallel_id, parallel_num,
+                                                         num_unique_matrix_trans_ptr, offset_ptr);
+      ComputeOffset2<<<1, 1, 0, cuda_stream>>>(parallel_num, cur_rank_num_unique_ids_ptr,
+                                               cur_rank_offset_ptr);
+
+      ContiguousCurRankUniqueInverseIndices<<<BlocksNum4ThreadsNum(indices_cnt),
+                                              kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
+          indices_cnt, parallel_id, num_ids, offset_ptr, global_inverse_unique_indices);
+
+      OF_NCCL_CHECK(
+          ncclReduceScatter(global_inverse_unique_indices, tmp_inverse_unique_partition_indices_ptr,
+                            num_ids, GetNcclDataType(inverse_unique_partition_indices->data_type()),
+                            ncclRedOp_t::ncclSum, comm, cuda_stream));
+
+      ContiguousUniqueIdsAndTableIds<<<BlocksNum4ThreadsNum(indices_cnt), kCudaThreadsNumPerBlock,
+                                       0, cuda_stream>>>(
+          indices_cnt, num_ids, cur_rank_num_unique_ids_ptr, cur_rank_offset_ptr,
+          cur_rank_unique_ids_ptr, cur_rank_unique_table_ids_ptr, contiguous_cur_rank_unique_id,
+          contiguous_cur_rank_unique_table_id);
+
+      OF_CUDA_CHECK(cudaMemsetAsync(tmp_cur_rank_num_unique_ptr, 0, sizeof(IDX), cuda_stream));
+      OF_CUDA_CHECK(cudaMemsetAsync(workspace_ptr, 0, workspace_size, cuda_stream));
+      HashTableUniquePairs<K, U, IDX, embedding::LocalUniqueHash>
+          <<<BlocksNum4ThreadsNum(indices_cnt), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
+              hash_table_capacity, indices_cnt, 0, 1, cur_rank_offset_ptr + parallel_num,
+              tmp_cur_rank_num_unique_ptr, reinterpret_cast<TableEntry<K>*>(workspace_ptr),
+              contiguous_cur_rank_unique_id, contiguous_cur_rank_unique_table_id,
+              tmp_cur_rank_unique_ids_ptr, tmp_cur_rank_unique_table_ids_ptr,
+              tmp_cur_rank_inverse_indices_ptr, need_process_table_ids, 0);
+      stream->EndGraphCapture(cuda_graph_exec_.get());
+      stream->LaunchGraph(cuda_graph_exec_.get());
+    }
+
     OF_CUDA_CHECK(cudaMemcpyAsync(cur_rank_num_unique->mut_dptr(), tmp_cur_rank_num_unique_ptr,
                                   cur_rank_num_unique->shape_view().elem_cnt() * sizeof(IDX),
                                   cudaMemcpyDefault, cuda_stream));
@@ -1044,6 +1057,9 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
   mutable int64_t current_iter_;
+#ifdef WITH_CUDA_GRAPHS
+  std::unique_ptr<ep::CudaGraphExecutable> cuda_graph_exec_;
+#endif  // WITH_CUDA_GRAPHS
 };
 
 #define ID_DATA_TYPE_SEQ                            \
