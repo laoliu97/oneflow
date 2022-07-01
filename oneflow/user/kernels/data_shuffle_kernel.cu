@@ -975,17 +975,22 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
     cudaMemcpyAsync(ids_ptr, ids->dptr(), ids->shape_view().elem_cnt() * sizeof(K),
                     cudaMemcpyDefault, cuda_stream);
 
-    U* table_ids_ptr = buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kTmpTableIds);
+    U* global_table_ids =
+        buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kGlobalTableIds);
     if (has_table_ids) {
+      // U* table_ids_ptr = buffer_manager.template
+      // Ptr<U>(IdShuffleCudaGraphBufferType::kTmpTableIds);
       const user_op::Tensor* table_ids = ctx->Tensor4ArgNameAndIndex("table_ids", 0);
-      cudaMemcpyAsync(table_ids_ptr, table_ids->dptr(),
-                      table_ids->shape_view().elem_cnt() * sizeof(U), cudaMemcpyDefault,
-                      cuda_stream);
+      // cudaMemcpyAsync(table_ids_ptr, table_ids->dptr(),
+      //                table_ids->shape_view().elem_cnt() * sizeof(U), cudaMemcpyDefault,
+      //                cuda_stream);
+      OF_NCCL_CHECK(ncclAllGather(table_ids->dptr(), global_table_ids, num_ids,
+                                  GetNcclDataType(ids->data_type()), comm, cuda_stream));
     } else if (need_gen_table_ids) {
       GenerateTableIds<<<BlocksNum4ThreadsNum(num_ids), kCudaThreadsNumPerBlock, 0, cuda_stream>>>(
-          num_ids, num_tables, table_ids_ptr);
+          parallel_num * num_ids, num_tables, global_table_ids);
     } else {
-      table_ids_ptr = nullptr;
+      global_table_ids = nullptr;
     }
     bool is_capturing = false;
     auto* stream = dynamic_cast<ep::CudaStream*>(ctx->stream());
@@ -1011,15 +1016,14 @@ class IdShuffleCudaGraphKernel final : public user_op::OpKernel {
     if (is_capturing) {
       stream->BeginGraphCapture();
       K* global_ids = buffer_manager.template Ptr<K>(IdShuffleCudaGraphBufferType::kGlobalIds);
-      U* global_table_ids =
-          buffer_manager.template Ptr<U>(IdShuffleCudaGraphBufferType::kGlobalTableIds);
+
       // 1. AllGather ids table_ids
       OF_NCCL_CHECK(ncclAllGather(ids_ptr, global_ids, num_ids, GetNcclDataType(ids->data_type()),
                                   comm, cuda_stream));
-      if (need_process_table_ids) {
-        OF_NCCL_CHECK(ncclAllGather(table_ids_ptr, global_table_ids, num_ids,
-                                    GetNcclDataType(ids->data_type()), comm, cuda_stream));
-      }
+      // if (need_process_table_ids) {
+      //  OF_NCCL_CHECK(ncclAllGather(table_ids_ptr, global_table_ids, num_ids,
+      //                              GetNcclDataType(ids->data_type()), comm, cuda_stream));
+      //}
       size_t hash_table_capacity = parallel_num * num_ids;
       void* workspace_ptr = buffer_manager.Ptr(IdShuffleCudaGraphBufferType::kWorkspace);
       size_t workspace_size = buffer_manager.Size(IdShuffleCudaGraphBufferType::kWorkspace);
